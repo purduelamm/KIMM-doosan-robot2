@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="my_mesh">
+    <static>true</static>
+    <link name="link">
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <uri>/home/robot_llam/BKyoon/working/chipblowing/arm_ws/src/scripts/meshes/VMC-300-l.obj</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </visual>
+      <collision name="collision">
+        <geometry>
+          <mesh>
+            <uri>/home/robot_llam/BKyoon/working/chipblowing/arm_ws/src/scripts/meshes/VMC-300-l.stl</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </collision>
+
+      <sensor name="contact_sensor" type="contact">
+        <contact>
+          <collision>link_collision</collision>
+        </contact>
+        <update_rate>100</update_rate>
+        <plugin name="gz::sim::systems::Contact" filename="libgz-sim-contact-system.so"/>
+      </sensor>
+    </link>
+  </model>
+</sdf>

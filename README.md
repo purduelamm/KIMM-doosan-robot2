@@ -11,6 +11,14 @@
 This package provides the function to control all models of Doosan robots in the ROS2(Jazzy) environment.
 
 
+## Gazebo Launch with CNC
+```
+$ ros2 launch dsr_bringup2 chip_blowing_gazebo.launch.py mode:=virtual host:=127.0.0.1 port:=12346     
+```
+```
+$ python3 demo2.py
+```
+
 ## Installation
 
 ### Prerequisites
