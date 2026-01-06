@@ -2,6 +2,7 @@ import rclpy
 import DR_init
 import sys
 import time
+from tool_control import ToolControlNode
 
 def main(args=None):
     rclpy.init(args=args)
@@ -15,29 +16,35 @@ def main(args=None):
     from DSR_ROBOT2 import movej, posj, movel, posx, set_robot_mode, get_current_posx, ROBOT_MODE_AUTONOMOUS
 
     set_robot_mode(ROBOT_MODE_AUTONOMOUS)
+    air_node = ToolControlNode(node)
 
+    time.sleep(5)
+    air_node.tool_airgun(True)
+    time.sleep(1)
     # Move to home position
     home_pos = posj(90, 0, -90, 0, 0, 0)
-    movej(home_pos, vel=60, acc=60)
+    movej(home_pos, vel=30, acc=30)
+    time.sleep(1)
+    air_node.tool_airgun(False)
     time.sleep(1)
     home_pos = posj(-70, 0, -90, 0, 0, 0)
-    movej(home_pos, vel=60, acc=60)
+    movej(home_pos, vel=30, acc=30)
     time.sleep(1)
     home_pos = posj(-70, -30, -60, 0, 0, 0)
-    movej(home_pos, vel=60, acc=60)
+    movej(home_pos, vel=30, acc=30)
     time.sleep(1)
-    home_pos = posj(-70, -30, -60, 0, -90, 0)
-    movej(home_pos, vel=60, acc=60)
+    home_pos = posj(-70, -30, -60, 0, -70, 0)
+    movej(home_pos, vel=30, acc=30)
     time.sleep(1)
 
     # Coverage area parameters (mm)
-    box_width = 200.0   # X direction
-    box_height = 200.0  # Y direction
+    box_width = 250.0   # X direction
+    box_height = 170.0  # Y direction
     line_spacing = 10.0 # Distance between parallel lines
     
     # Motion parameters
     vel = 30
-    acc = 60
+    acc = 30
 
     # Get home position as center point
     center = get_current_posx()[0]
@@ -73,9 +80,13 @@ def main(args=None):
     print(f"Box bounds: X[{start_x:.1f}, {start_x + box_width:.1f}], Y[{start_y:.1f}, {start_y + box_height:.1f}]")
     
     # Execute coverage path
+    air_node.tool_airgun(True)
+    time.sleep(1)
     for i, waypoint in enumerate(path):
         print(f"Waypoint {i + 1}/{len(path)}: x={waypoint[0]:.1f}, y={waypoint[1]:.1f}")
         movel(waypoint, vel=vel, acc=acc)
+    air_node.tool_airgun(False)
+    time.sleep(1)
 
     # Return to center (home)
     print("Returning to center...")
