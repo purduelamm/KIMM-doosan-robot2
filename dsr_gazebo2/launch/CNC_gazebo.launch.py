@@ -33,9 +33,9 @@ from launch.actions import ExecuteProcess
 
 ARGUMENTS =[ 
     DeclareLaunchArgument('name',         default_value = '',      description = 'NAME_SPACE'              ),
-    DeclareLaunchArgument('model',        default_value = 'm1013', description = 'ROBOT_MODEL'             ),
+    DeclareLaunchArgument('model',        default_value = 'm0609', description = 'ROBOT_MODEL'             ),
     DeclareLaunchArgument('color',        default_value = 'white', description = 'ROBOT_COLOR'             ),
-    DeclareLaunchArgument('gui',          default_value = 'false', description = 'Start RViz2'             ),
+    DeclareLaunchArgument('gui',          default_value = 'true', description = 'Start RViz2'             ),
     DeclareLaunchArgument('use_gazebo',   default_value = 'true',  description = 'Start Gazebo'            ),
     DeclareLaunchArgument('x',            default_value = '0',     description = 'Location x on Gazebo '   ),
     DeclareLaunchArgument('y',            default_value = '0',     description = 'Location y on Gazebo'    ),
@@ -56,7 +56,7 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             [FindPackageShare("ros_gz_sim"), "/launch/gz_sim.launch.py"]
         ),
-        launch_arguments={"gz_args": " -r -v 3 empty.sdf"}.items(),
+        launch_arguments={"gz_args": " -r -v 3 ~/BKyoon/working/chipblowing/empty_with_cam.sdf"}.items(),
     )
 
     # spawn robot arm
@@ -222,6 +222,24 @@ def generate_launch_description():
     )
 
 
+    # spawn camera
+    # 1. Bridge the camera image using ros_gz_image
+    image_bridge = Node(
+        package='ros_gz_image',
+        executable='image_bridge',
+        arguments=['/camera/image_raw'],
+        output='screen'
+    )
+
+    # 2. Bridge the camera info using standard ros_gz_bridge
+    # Syntax: /GazeboTopic@RosMessageType[GazeboMessageType
+    camera_info_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=['/camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo'],
+        output='screen'
+    )
+
     nodes = [
         gazebo,
         original_tf_nodes,
@@ -229,7 +247,9 @@ def generate_launch_description():
         gz_spawn_entity,
         gz_spawn_static_mesh,
         dsr_position_controller_spawner_action,
-        aaa
+        aaa,
+        image_bridge,
+        camera_info_bridge
         # delay_dsr_position_controller_spawner_after_joint_state_broadcaster_spawner
     ]
 

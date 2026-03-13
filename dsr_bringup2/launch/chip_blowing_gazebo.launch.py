@@ -47,7 +47,7 @@ def generate_launch_description():
         DeclareLaunchArgument('mode',         default_value = 'virtual',        description = 'OPERATION MODE'          ),
         DeclareLaunchArgument('model',        default_value = 'm0609',          description = 'ROBOT_MODEL'             ),
         DeclareLaunchArgument('color',        default_value = 'white',          description = 'ROBOT_COLOR'             ),
-        DeclareLaunchArgument('gui',          default_value = 'false',          description = 'Start RViz2'             ),
+        DeclareLaunchArgument('gui',          default_value = 'true',          description = 'Start RViz2'             ),
         DeclareLaunchArgument('gz',           default_value = 'true',           description = 'USE GAZEBO SIM'          ),
         DeclareLaunchArgument('x',            default_value = '-0.61',              description = 'Location x on Gazebo '   ),
         DeclareLaunchArgument('y',            default_value = '0.365',              description = 'Location y on Gazebo'    ),
@@ -220,15 +220,14 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('remap_tf'))
     )
 
-    # 두 번째 Launch 파일의 경로를 설정합니다.
+
+    #========= LAUNCH FILE THAT LOADS GAZEBO ELEMENTS ==========# 
     included_launch_file_path = os.path.join(
         get_package_share_directory('dsr_gazebo2'),
         'launch',
         'CNC_gazebo.launch.py'
     )
     
-    # IncludeLaunchDescription 액션을 사용하여 두 번째 Launch 파일을 포함합니다.
-    # launch_arguments를 사용하여 namespace를 설정합니다.
     included_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(included_launch_file_path),
         launch_arguments={'use_gazebo': LaunchConfiguration('gz'), 
@@ -243,7 +242,6 @@ def generate_launch_description():
                           'use_sim_time' : LaunchConfiguration('use_sim_time'),
                           }.items(),
     )
-    
 
     included_launch_after_robot_controller_spawner = RegisterEventHandler(
         event_handler=OnProcessExit(
@@ -251,6 +249,7 @@ def generate_launch_description():
             on_exit=[included_launch],
         )
     )
+    #========= LAUNCH FILE THAT LOADS GAZEBO ELEMENTS ==========# 
     
     # Delay start of robot_controller after `joint_state_broadcaster`
     delay_control_node_after_connection_node = RegisterEventHandler(
