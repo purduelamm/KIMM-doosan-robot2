@@ -292,7 +292,7 @@ def query_mesh_normals(
     y: float,   # in mesh coordinate
     R: float,
     angular_threshold_deg: float = 5.0,
-    total_points: int = 50_000_000,
+    total_points: int = 50_000,
     verbose: bool = True,
     z = None
 ) -> dict:
