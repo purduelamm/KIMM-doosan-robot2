@@ -1,3 +1,20 @@
+"""
+INPUT:
+* CNC zero is world coordinate
+* CNC zero to robot arm BASE
+* robot arm BASE to camera Optical
+* camera intrinsic (pinhole model)
+* CNC zero to vice mesh
+* vice mesh STL
+
+OPERATION:
+1. grab image and camera pose from ROS
+2. estimate normal from mesh
+3. generate endeffector pose
+
+OUTPUT:
+
+"""
 import sys
 import time
 from scipy.spatial.transform import Rotation as R
@@ -82,6 +99,8 @@ vice_mesh_path = (
     "/home/robot_llam/BKyoon/working/chipblowing/EEpose_from_mesh/mesh/Vice.stl"
 )
 
+IMG_TOPIC = "/camera/image_raw/compressed"
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -96,7 +115,7 @@ def make_SE3(R_mat: np.ndarray, t: np.ndarray) -> np.ndarray:
 # ── ROS helpers ───────────────────────────────────────────────────────────────
 
 
-def grab_image() -> np.ndarray:
+def grab_image(img_topic) -> np.ndarray:
     """Subscribe, grab one frame, unsubscribe."""
     latest = {"img": None}
 
@@ -106,7 +125,7 @@ def grab_image() -> np.ndarray:
         latest["img"] = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     sub = node.create_subscription(
-        CompressedImage, "/camera/image_raw/compressed", cb, 10
+        CompressedImage, img_topic, cb, 10
     )
     print("[img] Waiting for frame...")
     t0 = time.time()
@@ -352,14 +371,19 @@ def get_depth_from_mesh(
 
 
 def main(args=None):
+    # load CNC mesh
     cnc_mesh = trimesh.load_mesh(
         "/home/robot_llam/BKyoon/working/chipblowing/arm_ws/src/scripts/meshes/VMC-300-l.stl"
     )
+
+    # wake up robot arm and move to initial pose
     set_robot_mode(ROBOT_MODE_AUTONOMOUS)
-    # move_to_init()
+    move_to_init()
     time.sleep(3)
 
-    snapshot = grab_image()
+    # get current camera view
+    snapshot = grab_image(IMG_TOPIC)
+    # get current link 6 pose (w.r.t. BASE)
     R_b_6, t_b_6 = get_base_to_link6()
 
     # build transform chain
