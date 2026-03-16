@@ -286,17 +286,18 @@ def _deduplicate_normals(normals: np.ndarray, angular_threshold_deg: float) -> n
 # ── Convenience wrapper ───────────────────────────────────────────────────────
 
 def query_mesh_normals(
-    mesh_path: str,
+    # mesh_path: str,
+    mesh: str,
     x: float,   # in mesh coordinate
     y: float,   # in mesh coordinate
     R: float,
     angular_threshold_deg: float = 5.0,
-    total_points: int = 50_000,
+    total_points: int = 50_000_000,
     verbose: bool = True,
     z = None
 ) -> dict:
     """Full pipeline: load → point cloud → query normals."""
-    mesh    = load_mesh(mesh_path)
+    # mesh    = load_mesh(mesh_path)
     pts, nrm = mesh_to_pointcloud(mesh, total_points=total_points)
     result  = sample_normals_in_roi(mesh, pts, nrm, x, y, R, angular_threshold_deg, z)
 
@@ -507,6 +508,7 @@ def visualize_normals(mesh: trimesh.Trimesh, result: dict, normal_length: float 
     mesh_o3d.paint_uniform_color([0.75, 0.75, 0.75])
 
     sp  = result["surface_point"]
+    print("[VIZ]: sp ", sp)
     pts = result["roi_points"]
 
     # ── Auto-scale based on mesh diagonal (robust, not ROI-dependent) ─────────
@@ -566,6 +568,26 @@ def visualize_normals(mesh: trimesh.Trimesh, result: dict, normal_length: float 
 
         print(f"[visualize] Pose frame drawn at ({p[0]:.3f}, {p[1]:.3f}, {p[2]:.3f})  "
               f"arrow_length={frame_len:.3f}")
+    
+    # visualize coordinate frame
+    pos_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=sphere_r * 1.3)
+    pos_sphere.paint_uniform_color([1.0, 0.0, 0.0])
+    pos_sphere.compute_vertex_normals()
+    geometries.append(pos_sphere)
+    frame_len = normal_length * 1.5
+
+    axis_colors = [[1.0, 0.0, 0.0],   # X — red
+                   [0.0, 0.9, 0.0],   # Y — green
+                   [0.0, 0.3, 1.0]]   # Z — blue
+
+    axis_labels = ["X", "Y", "Z"]
+    R_axis = np.eye(3)
+    for i in range(3):
+        arrow = _make_arrow(o3d, [0,0,0], R_axis[:, i], frame_len, axis_colors[i])
+        geometries.append(arrow)
+
+
+
 
     o3d.visualization.draw_geometries(
         geometries,

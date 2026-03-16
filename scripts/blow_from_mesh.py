@@ -4,8 +4,7 @@ INPUT:
 * CNC zero to robot arm BASE
 * robot arm BASE to camera Optical
 * camera intrinsic (pinhole model)
-* CNC zero to vice mesh
-* vice mesh STL
+* CNC mesh (OBJ)
 
 OPERATION:
 1. grab image and camera pose from ROS
@@ -98,6 +97,7 @@ camera_K = np.array([[fx, 0, cx_k], [0, fy, cy_k], [0, 0, 1]])
 vice_mesh_path = (
     "/home/robot_llam/BKyoon/working/chipblowing/EEpose_from_mesh/mesh/Vice.stl"
 )
+CNC_mesh_path = "/home/robot_llam/BKyoon/working/chipblowing/arm_ws/src/doosan-robot2/scripts/meshes/VMC-300-l.obj"
 
 IMG_TOPIC = "/camera/image_raw/compressed"
 
@@ -283,10 +283,9 @@ def world_to_mesh(query_world: np.ndarray) -> tuple[float, float]:
     Mesh origin = VICE_ORIGIN_WORLD.
     Mesh X increases in world -X, mesh Y increases in world -Y.
     """
-    print("vice_origin_world: ", VICE_ORIGIN_WORLD)
-    delta = query_world - VICE_ORIGIN_WORLD
-    mesh_x = MESH_X_SIGN * delta[0] * MESH_DIMENSION
-    mesh_y = MESH_Y_SIGN * delta[1] * MESH_DIMENSION
+    delta = query_world
+    mesh_x = delta[0] * MESH_DIMENSION
+    mesh_y = delta[1] * MESH_DIMENSION
     return mesh_x, mesh_y
 
 
@@ -367,6 +366,20 @@ def get_depth_from_mesh(
     return hit_cam[2]
 
 
+def match_mesh_with_world(mesh):
+    bounds = mesh.bounds  # shape (2, 3): [min_xyz, max_xyz]
+    x_min, y_min = bounds[0, 0], bounds[0, 1]
+    x_max, y_max = bounds[1, 0], bounds[1, 1]
+
+    # Flip X and Y, then shift zero point to the opposite side
+    # After flipping: new_x = -x, new_y = -y
+    # Zero point moves to (-x_max, -y_max), so shift to bring it to (0, 0)
+    mesh.vertices[:, 0] -= x_max  # flip X
+    mesh.vertices[:, 1] -= y_max  # flip Y
+    # Z is untouched
+    return mesh
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 
@@ -378,7 +391,7 @@ def main(args=None):
 
     # wake up robot arm and move to initial pose
     set_robot_mode(ROBOT_MODE_AUTONOMOUS)
-    move_to_init()
+    # move_to_init()
     time.sleep(3)
 
     # get current camera view
@@ -424,12 +437,14 @@ def main(args=None):
     print("cam position (world):", T_w_cm[:3, 3])
 
     # query normals
-    query_mesh_z = (query_world[2] - VICE_ORIGIN_WORLD[2]) * MESH_DIMENSION
+    CNC_mesh = trimesh.load_mesh(CNC_mesh_path)
+    # CNC_mesh = match_mesh_with_world(CNC_mesh)
+    query_mesh_z = (query_world[2]) * MESH_DIMENSION
     normals = query_mesh_normals(
-        vice_mesh_path, query_mesh_x, query_mesh_y, 10, z=query_mesh_z
+        CNC_mesh, query_mesh_x, query_mesh_y, 10, z=query_mesh_z
     )
-    vice_mesh = trimesh.load(vice_mesh_path, force="mesh")
-    vice_mesh.vertices -= vice_mesh.bounds[0]
+    # vice_mesh = trimesh.load(CNC_mesh_path, force="mesh")
+    # vice_mesh.vertices -= vice_mesh.bounds[0]
 
     # find desired SE(3)
     d = 0.05
@@ -437,7 +452,7 @@ def main(args=None):
     normals["pose"] = pose
 
     # visualize normals and pose
-    visualize_normals(vice_mesh, normals)
+    visualize_normals(CNC_mesh, normals)
 
     ## TODO: convert desired EE pose to base frame
 
