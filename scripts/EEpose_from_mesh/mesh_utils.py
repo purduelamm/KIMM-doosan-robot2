@@ -315,7 +315,6 @@ def query_mesh_normals(
 
 
 # ── SE(3) pose computation ────────────────────────────────────────────────────
-
 def compute_se3_pose(result: dict, d: float) -> dict:
     """
     Compute an SE(3) pose from the unique normals and ROI surface point.
@@ -325,13 +324,13 @@ def compute_se3_pose(result: dict, d: float) -> dict:
     1. Sum all unique normals → v (then normalise).
     2. Position = surface_point + v * d   (d units away along v from ROI centre).
     3. Build rotation matrix R = [x_axis | y_axis | z_axis]:
-         x_axis = -v                              (approach direction)
-         y_axis = normalise(x_axis × world_Z)     (horizontal, perp to approach)
-                  (if x_axis ∥ world_Z, fall back to world_X as reference)
-         z_axis = normalise(y_axis × x_axis)      (guarantees world_Z · z_axis >= 0
-                  because z_axis is constructed from the cross product that keeps
+         z_axis = -v                              (approach direction)
+         x_axis = normalise(z_axis × world_Z)     (horizontal, perp to approach)
+                  (if z_axis ∥ world_Z, fall back to world_X as reference)
+         y_axis = normalise(x_axis × z_axis)      (guarantees world_Z · y_axis >= 0
+                  because y_axis is constructed from the cross product that keeps
                   the frame right-handed and upward)
-         Flip z_axis if world_Z · z_axis < 0.
+         Flip y_axis if world_Z · y_axis < 0.
 
     Parameters
     ----------
@@ -346,45 +345,43 @@ def compute_se3_pose(result: dict, d: float) -> dict:
         'v'          : (3,)   normalised summed normal direction
         'T'          : (4, 4) homogeneous SE(3) transform
     """
-    unique = result["unique_normals"]          # (M, 3), already unit vectors
-    sp     = result["surface_point"]           # (3,)
+    unique = result["unique_normals"]
+    sp     = result["surface_point"]
 
-    # ── Step 1: sum unique normals → v ───────────────────────────────────────
+    # Step 1: sum unique normals -> v
     v_raw = unique.sum(axis=0)
     v_norm = np.linalg.norm(v_raw)
     if v_norm < 1e-12:
         raise ValueError("Sum of unique normals is zero — cannot determine approach direction.")
-    v = v_raw / v_norm                         # unit approach direction
+    v = v_raw / v_norm
 
-    # ── Step 2: position ─────────────────────────────────────────────────────
+    # Step 2: position
     position = sp + v * d
 
-    # ── Step 3: rotation matrix ───────────────────────────────────────────────
+    # Step 3: rotation matrix — z=approach (Doosan convention)
     world_Z = np.array([0.0, 0.0, 1.0])
 
-    x_axis = -v                                # robot approaches along -v
+    z_axis = -v                                # approach direction (into surface)
 
-    # y_axis must satisfy: world_Z · y_axis = 0  (horizontal)
-    cross = np.cross(x_axis, world_Z)
+    # x_axis: horizontal, perpendicular to approach
+    cross = np.cross(z_axis, world_Z)
     cross_norm = np.linalg.norm(cross)
     if cross_norm < 1e-6:
-        # x_axis is (anti-)parallel to world_Z — use world_X as fallback
-        cross = np.cross(x_axis, np.array([1.0, 0.0, 0.0]))
+        cross = np.cross(z_axis, np.array([1.0, 0.0, 0.0]))
         cross_norm = np.linalg.norm(cross)
-    y_axis = cross / cross_norm
+    x_axis = cross / cross_norm
 
-    # z_axis: right-hand rule, then ensure world_Z · z_axis >= 0
-    z_axis = np.cross(x_axis, y_axis)
-    z_axis /= np.linalg.norm(z_axis)
-    if np.dot(world_Z, z_axis) < 0:
-        z_axis = -z_axis
-        y_axis = np.cross(z_axis, x_axis)      # keep frame right-handed
-        y_axis /= np.linalg.norm(y_axis)
+    # y_axis: right-hand rule, ensure world_Z . y_axis >= 0
+    y_axis = np.cross(z_axis, x_axis)
+    y_axis /= np.linalg.norm(y_axis)
+    if np.dot(world_Z, y_axis) < 0:
+        y_axis = -y_axis
+        x_axis = np.cross(y_axis, z_axis)      # keep frame right-handed
+        x_axis /= np.linalg.norm(x_axis)
 
-    # Columns = axes expressed in world frame
-    R_mat = np.column_stack([x_axis, y_axis, z_axis])  # (3, 3)
+    # columns = axes in world frame
+    R_mat = np.column_stack([x_axis, y_axis, z_axis])  # z-forward
 
-    # Homogeneous transform
     T = np.eye(4)
     T[:3, :3] = R_mat
     T[:3,  3] = position

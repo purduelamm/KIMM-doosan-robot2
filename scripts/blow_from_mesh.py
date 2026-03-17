@@ -14,9 +14,12 @@ OPERATION:
 OUTPUT:
 
 """
+
 import sys
 import time
 from scipy.spatial.transform import Rotation as R
+from scipy.interpolate import CubicSpline
+from scipy.spatial.transform import Slerp
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
@@ -109,9 +112,7 @@ def grab_image(img_topic) -> np.ndarray:
         img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         latest["img"] = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    sub = node.create_subscription(
-        CompressedImage, img_topic, cb, 10
-    )
+    sub = node.create_subscription(CompressedImage, img_topic, cb, 10)
     print("[img] Waiting for frame...")
     t0 = time.time()
     while latest["img"] is None:
@@ -156,6 +157,7 @@ def get_base_to_link6() -> tuple[np.ndarray, np.ndarray]:
     rotation = R.from_quat([rot.x, rot.y, rot.z, rot.w]).as_matrix()
     print(f"[tf] base_link -> link_6\n  t={translation}\n  R=\n{rotation}")
     return rotation, translation
+
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 def pick_xy_from_camera(snapshot: np.ndarray) -> tuple[float, float]:
@@ -364,6 +366,246 @@ def match_mesh_with_world(mesh):
     # Z is untouched
     return mesh
 
+# ── trajectory helpers ────────────────────────────────────────────────────────
+
+
+def consistent_rotations(poses: list[np.ndarray]) -> list[np.ndarray]:
+    """
+    Ensure consecutive rotation matrices don't flip sign during SLERP.
+    If the dot product of consecutive quaternions is negative, negate the
+    second quaternion to force the short-arc interpolation path.
+    """
+    poses = [p.copy() for p in poses]
+    quats = [R.from_matrix(T[:3, :3]).as_quat() for T in poses]
+
+    for i in range(1, len(quats)):
+        if np.dot(quats[i - 1], quats[i]) < 0:
+            quats[i] = -quats[i]
+        poses[i][:3, :3] = R.from_quat(quats[i]).as_matrix()
+
+    return poses
+
+
+def se3_to_doosan_posx(T_b_ee: np.ndarray) -> list:
+    """
+    SE(3) in BASE frame (meters) -> Doosan posx [x(mm), y(mm), z(mm), rz1, ry, rz2].
+    Doosan uses extrinsic ZYZ Euler (degrees).
+    """
+    t_mm = T_b_ee[:3, 3] * 1000.0
+    rz1, ry, rz2 = R.from_matrix(T_b_ee[:3, :3]).as_euler("ZYZ", degrees=True)
+    return [
+        float(t_mm[0]),
+        float(t_mm[1]),
+        float(t_mm[2]),
+        float(rz1),
+        float(ry),
+        float(rz2),
+    ]
+
+
+def mesh_pose_to_base(T_world_ee: np.ndarray, T_w_b: np.ndarray) -> np.ndarray:
+    """
+    Convert EE pose from world frame (meters) to robot base frame (meters).
+    T_world_ee must already be in meters before calling this.
+
+    T_b_ee = inv(T_w_b) @ T_world_ee
+    """
+    return np.linalg.inv(T_w_b) @ T_world_ee
+
+
+def generate_smooth_trajectory(
+    poses: list[np.ndarray],
+    n_interp: int = 50,
+) -> list[np.ndarray]:
+    """
+    Given a list of SE(3) poses (4×4, world frame, meters),
+    generate a smooth trajectory via:
+      - Cubic spline for translation (arc-length parameterised)
+      - SLERP for rotation (short-arc guaranteed)
+
+    Parameters
+    ----------
+    poses    : list of N 4×4 SE(3) matrices (meters)
+    n_interp : number of interpolated poses between each consecutive pair
+
+    Returns
+    -------
+    trajectory : list of 4×4 SE(3) matrices (dense, smooth, meters)
+    """
+    N = len(poses)
+    if N < 2:
+        raise ValueError("Need at least 2 poses to generate a trajectory.")
+
+    # arc-length parameterisation
+    translations = np.array([T[:3, 3] for T in poses])
+    dists = np.linalg.norm(np.diff(translations, axis=0), axis=1)
+    dists = np.maximum(dists, 1e-8)
+    t_knots = np.concatenate([[0.0], np.cumsum(dists)])
+    t_knots /= t_knots[-1]
+
+    # cubic spline on translation
+    cs = CubicSpline(t_knots, translations)
+
+    # SLERP on rotation — enforce short-arc via quaternion sign consistency
+    quats = [R.from_matrix(T[:3, :3]).as_quat() for T in poses]
+    for i in range(1, len(quats)):
+        if np.dot(quats[i - 1], quats[i]) < 0:
+            quats[i] = -quats[i]
+    rotations = R.from_quat(quats)
+    slerp = Slerp(t_knots, rotations)
+
+    # dense parameter values
+    t_dense = np.linspace(0.0, 1.0, (N - 1) * n_interp + 1)
+
+    trajectory = []
+    for t in t_dense:
+        T = np.eye(4)
+        T[:3, 3] = cs(t)
+        T[:3, :3] = slerp(t).as_matrix()
+        trajectory.append(T)
+
+    return trajectory
+
+
+def visualize_trajectory(
+    mesh: trimesh.Trimesh,
+    keyframes: list[np.ndarray],
+    trajectory: list[np.ndarray],
+    axis_len: float = 0.02,
+) -> None:
+    """
+    Visualise the smooth trajectory and keyframe EE frames over the CNC mesh.
+
+    Shows:
+      - Mesh surface (grey, translucent)
+      - Dense trajectory path (blue line)
+      - Keyframe coordinate frames (R=X, G=Y, B=Z axes)
+
+    Parameters
+    ----------
+    mesh       : trimesh in mesh coords (mm) — converted to meters internally
+    keyframes  : list of 4×4 SE(3) in world frame (meters)
+    trajectory : list of 4×4 SE(3) in world frame (meters)
+    axis_len   : quiver length for EE axes (meters)
+    """
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    fig = plt.figure(figsize=(12, 8))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_title("EE Trajectory over CNC Mesh", fontsize=12)
+
+    # mesh surface (mm -> m)
+    verts = mesh.vertices / MESH_DIMENSION
+    faces = mesh.faces
+    mesh_poly = Poly3DCollection(
+        verts[faces],
+        alpha=0.15,
+        facecolor="lightgrey",
+        edgecolor="none",
+    )
+    ax.add_collection3d(mesh_poly)
+
+    # trajectory path
+    traj_pts = np.array([T[:3, 3] for T in trajectory])
+    ax.plot(
+        traj_pts[:, 0], traj_pts[:, 1], traj_pts[:, 2],
+        color="royalblue", linewidth=1.5, label="Trajectory",
+    )
+
+    # keyframe EE coordinate frames (R=X, G=Y, B=Z)
+    axis_colors = [("x", "red", 0), ("y", "green", 1), ("z", "blue", 2)]
+    for i, T in enumerate(keyframes):
+        origin = T[:3, 3]
+        for name, col, idx in axis_colors:
+            direction = T[:3, idx]
+            ax.quiver(
+                *origin, *direction,
+                length=axis_len,
+                color=col,
+                linewidth=1.8,
+                arrow_length_ratio=0.25,
+                label=f"{name.upper()}-axis" if i == 0 else "",
+            )
+        ax.text(*origin, f" {i}", fontsize=7, color="black")
+
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.set_zlabel("Z (m)")
+
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(dict(zip(labels, handles)).values(),
+              dict(zip(labels, handles)).keys(), fontsize=8)
+
+    # equal aspect ratio
+    all_pts = np.vstack([traj_pts, verts])
+    for setter, dim in zip([ax.set_xlim, ax.set_ylim, ax.set_zlim], range(3)):
+        lo, hi = all_pts[:, dim].min(), all_pts[:, dim].max()
+        mid = (lo + hi) / 2
+        half = max((hi - lo) / 2, 0.05)
+        setter(mid - half, mid + half)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def check_reachable(T_base_ee: np.ndarray, robot_reach: float = 0.900) -> bool:
+    """
+    Rough reachability check for M0609 (max reach ~900mm).
+    Returns False if too far from base or below base plane.
+    """
+    t = T_base_ee[:3, 3]
+    dist = np.linalg.norm(t)
+    if dist > robot_reach:
+        print(f"[check] UNREACHABLE: distance {dist*1000:.1f}mm > {robot_reach*1000:.0f}mm")
+        return False
+    if t[2] < -0.05:
+        print(f"[check] UNREACHABLE: z={t[2]*1000:.1f}mm is below base plane")
+        return False
+    return True
+
+
+def execute_trajectory(
+    trajectory: list[np.ndarray],
+    T_w_b: np.ndarray,
+    vel: float = 50.0,
+    acc: float = 50.0,
+    skip: int = 5,
+) -> None:
+    """
+    Execute the trajectory on the Doosan arm waypoint by waypoint.
+    movel() with default mod=0 is synchronous — the arm stops at each
+    waypoint before the next command is sent, faithfully following the path.
+
+    Parameters
+    ----------
+    trajectory : dense list of 4×4 SE(3) in world frame (meters)
+    T_w_b      : world-from-base SE(3) (4×4)
+    vel, acc   : movel velocity / acceleration limits
+    skip       : send every Nth dense pose to reduce command count
+    """
+    waypoints = trajectory[::skip]
+    if trajectory[-1] is not waypoints[-1]:
+        waypoints = list(waypoints) + [trajectory[-1]]
+
+    # pre-flight reachability check
+    print(f"[exec] Pre-flight check on {len(waypoints)} waypoints...")
+    for i, T_world_ee in enumerate(waypoints):
+        T_base_ee = mesh_pose_to_base(T_world_ee, T_w_b)
+        if not check_reachable(T_base_ee):
+            raise RuntimeError(
+                f"[exec] Waypoint {i} not reachable — aborting.\n"
+                f"  world={T_world_ee[:3,3]}  base={T_base_ee[:3,3]}"
+            )
+
+    print(f"[exec] Executing {len(waypoints)} waypoints (skip={skip})...")
+    for i, T_world_ee in enumerate(waypoints):
+        T_base_ee   = mesh_pose_to_base(T_world_ee, T_w_b)
+        doosan_pose = se3_to_doosan_posx(T_base_ee)
+        print(f"[exec] wp{i:03d}  base(m)={np.round(T_base_ee[:3,3],3)}  posx={[f'{v:.1f}' for v in doosan_pose]}")
+        movel(posx(*doosan_pose), vel=vel, acc=acc)
+
+    print("[exec] Trajectory complete.")
+
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
@@ -373,7 +615,7 @@ def main(args=None):
     CNC_mesh = trimesh.load_mesh(CNC_mesh_path)
     # wake up robot arm and move to initial pose
     set_robot_mode(ROBOT_MODE_AUTONOMOUS)
-    # move_to_init()
+    move_to_init()
     time.sleep(3)
 
     # get current camera view
@@ -390,50 +632,81 @@ def main(args=None):
     print("T_6_cm, ", T_6_cm)
     T_w_cm = T_w_b @ T_b_6 @ T_6_cm
 
-    print(f"[cam] position in world:     {T_w_cm[:3, 3]}")
-    print(f"[cam] optical axis in world: {T_w_cm[:3, 2]}")
 
-    # pick pixel
-    pu, pv = pick_xy_from_camera(snapshot)
-    print(f"[main] Picked pixel: ({pu:.1f}, {pv:.1f})")
+    # stack keyframes
+    keyframes = []
+    point_idx = 0
+    while True:
+        print(f"\n[loop] === Point {point_idx} ===")
 
-    # pixel -> world
-    # query_world = pixel_to_world(pu, pv, T_w_cm)
-    z_cam = get_depth_from_mesh(pu, pv, T_w_cm, CNC_mesh)
-    print("depth: ", z_cam, " world_z: ", T_w_cm[2, 3] - z_cam)
-    query_world = pixel_to_world(pu, pv, z_cam, T_w_cm)
-    print(f"[main] query_world: {query_world}")
+        # pick pixel
+        pu, pv = pick_xy_from_camera(snapshot)
+        print(f"[main] Picked pixel: ({pu:.1f}, {pv:.1f})")
 
-    # world -> mesh
-    query_mesh_x, query_mesh_y = world_to_mesh(query_world)
-    print(f"[main] query_mesh_x={query_mesh_x:.2f}  query_mesh_y={query_mesh_y:.2f}")
+        # depth via mesh raycasting
+        z_cam = get_depth_from_mesh(pu, pv, T_w_cm, CNC_mesh)
+        print("depth: ", z_cam, " world_z: ", T_w_cm[2, 3] - z_cam)
 
-    print("T_w_b:\n", T_w_b)
-    print("T_b_6:\n", T_b_6)
-    print("T_6_cm:\n", T_6_cm)
-    print("T_w_cm:\n", T_w_cm)
-    print("cam optical axis (world):", T_w_cm[:3, 2])
-    print("cam position (world):", T_w_cm[:3, 3])
+        # pixel -> world
+        query_world = pixel_to_world(pu, pv, z_cam, T_w_cm)
+        print(f"[main] query_world: {query_world}")
 
-    # query normals
-    # CNC_mesh = match_mesh_with_world(CNC_mesh)
-    query_mesh_z = (query_world[2]) * MESH_DIMENSION
-    normals = query_mesh_normals(
-        CNC_mesh, query_mesh_x, query_mesh_y, 10, total_points=5_000_000, z=query_mesh_z
-    )
+        # world -> mesh
+        query_mesh_x, query_mesh_y = world_to_mesh(query_world)
+        query_mesh_z = (query_world[2]) * MESH_DIMENSION
+        print(
+            f"[main] query_mesh_x={query_mesh_x:.2f}  query_mesh_y={query_mesh_y:.2f}"
+        )
 
-    # find desired SE(3)
-    d = 0.5   ## offset from query surface: 0.5m
-    pose = compute_se3_pose(normals, d * MESH_DIMENSION)
-    normals["pose"] = pose
+        # query normals
+        normals = query_mesh_normals(
+            CNC_mesh,
+            query_mesh_x,
+            query_mesh_y,
+            10,
+            total_points=5_000_000,
+            z=query_mesh_z,
+        )
 
-    # visualize normals and pose
-    visualize_normals(CNC_mesh, normals, normal_length=100)
+        # find desired SE(3)
+        d = 0.1  ## offset from query surface: 0.1m
+        pose = compute_se3_pose(normals, d * MESH_DIMENSION)
+        normals["pose"] = pose
 
-    ## TODO: convert desired EE pose to base frame
+        # visualize normals and pose
+        visualize_normals(CNC_mesh, normals, normal_length=100)
+
+        # stack ee pose
+        # pose["T"] is 4×4 in mesh coords (mm), z-axis = approach direction
+        T_world_ee = pose["T"].copy()
+        T_world_ee[:3, 3] /= MESH_DIMENSION  # mm -> m
+        keyframes.append(T_world_ee)
+
+        ans = input("[loop] Add another point? [y/N]: ").strip().lower()
+        if ans != "y":
+            break
+
+    print(f"\n[traj] Collected {len(keyframes)} keyframe(s).")
+
+    # ── generate smooth trajectory ────────────────────────────────────────────
+    keyframes = consistent_rotations(keyframes)
+
+    if len(keyframes) >= 2:
+        trajectory = generate_smooth_trajectory(keyframes, n_interp=50)
+        print(f"[traj] Generated {len(trajectory)} interpolated poses.")
+    else:
+        trajectory = keyframes
+        print("[traj] Single keyframe — skipping interpolation.")
+
+    # ── visualise ─────────────────────────────────────────────────────────────
+    visualize_trajectory(CNC_mesh, keyframes, trajectory, axis_len=0.02)
+
+    # ── execute ───────────────────────────────────────────────────────────────
+    confirm = input("[exec] Execute trajectory on robot? [y/N]: ").strip().lower()
+    if confirm == "y":
+        execute_trajectory(trajectory, T_w_b, vel=50, acc=50, skip=5)
 
     rclpy.shutdown()
-
 
 if __name__ == "__main__":
     main()
