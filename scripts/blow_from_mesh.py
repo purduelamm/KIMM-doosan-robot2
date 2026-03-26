@@ -24,6 +24,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 import cv2
+from ros_gz_interfaces.srv import SpawnEntity
 
 import rclpy
 import DR_init
@@ -54,6 +55,7 @@ from DSR_ROBOT2 import (
     posx,
     set_robot_mode,
     get_current_posx,
+    get_current_tool_flange_posx,
     ROBOT_MODE_AUTONOMOUS,
 )
 
@@ -396,7 +398,7 @@ def se3_to_doosan_posx(T_b_ee: np.ndarray) -> list:
     return [
         float(t_mm[0]),
         float(t_mm[1]),
-        float(t_mm[2]),
+        float(t_mm[2] + 35),
         float(rz1),
         float(ry),
         float(rz2),
@@ -473,79 +475,49 @@ def visualize_trajectory(
     trajectory: list[np.ndarray],
     axis_len: float = 0.02,
 ) -> None:
-    """
-    Visualise the smooth trajectory and keyframe EE frames over the CNC mesh.
+    import open3d as o3d
 
-    Shows:
-      - Mesh surface (grey, translucent)
-      - Dense trajectory path (blue line)
-      - Keyframe coordinate frames (R=X, G=Y, B=Z axes)
+    geometries = []
 
-    Parameters
-    ----------
-    mesh       : trimesh in mesh coords (mm) — converted to meters internally
-    keyframes  : list of 4×4 SE(3) in world frame (meters)
-    trajectory : list of 4×4 SE(3) in world frame (meters)
-    axis_len   : quiver length for EE axes (meters)
-    """
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    # ── mesh ──────────────────────────────────────────────────────────────────
+    o3d_mesh = o3d.geometry.TriangleMesh()
+    o3d_mesh.vertices  = o3d.utility.Vector3dVector(mesh.vertices / MESH_DIMENSION)
+    o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh.faces)
+    o3d_mesh.compute_vertex_normals()
+    o3d_mesh.paint_uniform_color([0.75, 0.75, 0.75])
+    geometries.append(o3d_mesh)
 
-    fig = plt.figure(figsize=(12, 8))
-    ax = fig.add_subplot(111, projection="3d")
-    ax.set_title("EE Trajectory over CNC Mesh", fontsize=12)
-
-    # mesh surface (mm -> m)
-    verts = mesh.vertices / MESH_DIMENSION
-    faces = mesh.faces
-    mesh_poly = Poly3DCollection(
-        verts[faces],
-        alpha=0.15,
-        facecolor="lightgrey",
-        edgecolor="none",
-    )
-    ax.add_collection3d(mesh_poly)
-
-    # trajectory path
+    # ── trajectory line set ───────────────────────────────────────────────────
     traj_pts = np.array([T[:3, 3] for T in trajectory])
-    ax.plot(
-        traj_pts[:, 0], traj_pts[:, 1], traj_pts[:, 2],
-        color="royalblue", linewidth=1.5, label="Trajectory",
+    lines    = [[i, i + 1] for i in range(len(traj_pts) - 1)]
+    ls = o3d.geometry.LineSet(
+        points=o3d.utility.Vector3dVector(traj_pts),
+        lines=o3d.utility.Vector2iVector(lines),
+    )
+    ls.paint_uniform_color([0.26, 0.52, 0.96])   # royalblue
+    geometries.append(ls)
+
+    # ── keyframe coordinate frames ────────────────────────────────────────────
+    for T in keyframes:
+        frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+            size=axis_len, origin=T[:3, 3]
+        )
+        # rotate the canonical frame into the EE orientation
+        frame.rotate(T[:3, :3], center=T[:3, 3])
+        geometries.append(frame)
+
+    # ── world origin frame (small, for reference) ────────────────────────────
+    geometries.append(
+        o3d.geometry.TriangleMesh.create_coordinate_frame(size=axis_len * 0.5)
     )
 
-    # keyframe EE coordinate frames (R=X, G=Y, B=Z)
-    axis_colors = [("x", "red", 0), ("y", "green", 1), ("z", "blue", 2)]
-    for i, T in enumerate(keyframes):
-        origin = T[:3, 3]
-        for name, col, idx in axis_colors:
-            direction = T[:3, idx]
-            ax.quiver(
-                *origin, *direction,
-                length=axis_len,
-                color=col,
-                linewidth=1.8,
-                arrow_length_ratio=0.25,
-                label=f"{name.upper()}-axis" if i == 0 else "",
-            )
-        ax.text(*origin, f" {i}", fontsize=7, color="black")
-
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
-    ax.set_zlabel("Z (m)")
-
-    handles, labels = ax.get_legend_handles_labels()
-    ax.legend(dict(zip(labels, handles)).values(),
-              dict(zip(labels, handles)).keys(), fontsize=8)
-
-    # equal aspect ratio
-    all_pts = np.vstack([traj_pts, verts])
-    for setter, dim in zip([ax.set_xlim, ax.set_ylim, ax.set_zlim], range(3)):
-        lo, hi = all_pts[:, dim].min(), all_pts[:, dim].max()
-        mid = (lo + hi) / 2
-        half = max((hi - lo) / 2, 0.05)
-        setter(mid - half, mid + half)
-
-    plt.tight_layout()
-    plt.show()
+    o3d.visualization.draw_geometries(
+        geometries,
+        window_name="EE Trajectory over CNC Mesh",
+        width=1280,
+        height=800,
+        mesh_show_back_face=True,
+    )
 
 
 def check_reachable(T_base_ee: np.ndarray, robot_reach: float = 0.900) -> bool:
@@ -601,11 +573,17 @@ def execute_trajectory(
     for i, T_world_ee in enumerate(waypoints):
         T_base_ee   = mesh_pose_to_base(T_world_ee, T_w_b)
         doosan_pose = se3_to_doosan_posx(T_base_ee)
+        print(f"[exec, world] wp{i:03d}  base(m)={np.round(T_world_ee[:3,3],7)}")
         print(f"[exec] wp{i:03d}  base(m)={np.round(T_base_ee[:3,3],3)}  posx={[f'{v:.1f}' for v in doosan_pose]}")
         movel(posx(*doosan_pose), vel=vel, acc=acc)
+        time.sleep(0.5)
+        actual, _ = get_current_posx()
+        print(f"[verify] commanded: {[f'{v:.1f}' for v in doosan_pose]}")
+        print(f"[verify] actual   : {[f'{v:.1f}' for v in actual]}")
+        print(f"[verify] delta    : {[f'{doosan_pose[i]-actual[i]:.1f}' for i in range(6)]}")
+
 
     print("[exec] Trajectory complete.")
-
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
@@ -669,7 +647,7 @@ def main(args=None):
         )
 
         # find desired SE(3)
-        d = 0.1  ## offset from query surface: 0.1m
+        d = 0.2  ## offset from query surface: 0.1m
         pose = compute_se3_pose(normals, d * MESH_DIMENSION)
         normals["pose"] = pose
 
@@ -699,7 +677,7 @@ def main(args=None):
         print("[traj] Single keyframe — skipping interpolation.")
 
     # ── visualise ─────────────────────────────────────────────────────────────
-    visualize_trajectory(CNC_mesh, keyframes, trajectory, axis_len=0.02)
+    visualize_trajectory(CNC_mesh, keyframes, trajectory, axis_len=0.2)
 
     # ── execute ───────────────────────────────────────────────────────────────
     confirm = input("[exec] Execute trajectory on robot? [y/N]: ").strip().lower()
