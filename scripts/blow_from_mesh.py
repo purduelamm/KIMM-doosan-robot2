@@ -40,6 +40,7 @@ from EEpose_from_mesh.mesh_utils import (
     compute_se3_pose,
 )
 import trimesh
+import pandas as pd
 
 rclpy.init()
 ROBOT_ID = "dsr01"
@@ -559,6 +560,8 @@ def execute_trajectory(
     if trajectory[-1] is not waypoints[-1]:
         waypoints = list(waypoints) + [trajectory[-1]]
 
+    doosan_pose_list = np.zeros((len(waypoints), 6))
+
     # pre-flight reachability check
     print(f"[exec] Pre-flight check on {len(waypoints)} waypoints...")
     for i, T_world_ee in enumerate(waypoints):
@@ -573,6 +576,7 @@ def execute_trajectory(
     for i, T_world_ee in enumerate(waypoints):
         T_base_ee   = mesh_pose_to_base(T_world_ee, T_w_b)
         doosan_pose = se3_to_doosan_posx(T_base_ee)
+        doosan_pose_list[i,:] = doosan_pose
         print(f"[exec, world] wp{i:03d}  base(m)={np.round(T_world_ee[:3,3],7)}")
         print(f"[exec] wp{i:03d}  base(m)={np.round(T_base_ee[:3,3],3)}  posx={[f'{v:.1f}' for v in doosan_pose]}")
         movel(posx(*doosan_pose), vel=vel, acc=acc)
@@ -584,6 +588,9 @@ def execute_trajectory(
 
 
     print("[exec] Trajectory complete.")
+
+    df = pd.DataFrame(doosan_pose_list)
+    df.to_csv("doosan_pose_list.csv", index = False, header = ["tx", "ty", "tz", "rz1", "ry", "rz2"])
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
