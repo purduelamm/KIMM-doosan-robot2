@@ -207,6 +207,15 @@ def generate_launch_description():
 
     rviz_node = OpaqueFunction(function=rviz_node_function)
 
+    # Static TF
+    static_tf = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="static_transform_publisher",
+        output="log",
+        arguments=["0.5", "0.0", "0.0", "0.0", "0.0", "0.0", "world", "base_link"],
+    )
+
     delay_jsb_after_control_node = RegisterEventHandler(
         OnProcessStart(
             target_action=control_node,
@@ -241,6 +250,7 @@ def generate_launch_description():
     )
 
     nodes = [
+        static_tf,
         run_emulator_node,
         robot_state_pub_node,
         control_node,

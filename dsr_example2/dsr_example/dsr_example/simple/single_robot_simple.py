@@ -5,8 +5,8 @@ import sys
 from rclpy.logging import get_logger
 
 # for single robot
-ROBOT_ID   = "dsr01"
-ROBOT_MODEL= "m1013"
+ROBOT_ID   = ""
+ROBOT_MODEL= "m0609"
 
 import DR_init
 DR_init.__dsr__id   = ROBOT_ID
@@ -57,7 +57,7 @@ def main(args=None):
         q5 = posj(20, 20, 40, 20, 0, 90)
         qlist = [q0, q1, q2, q3, q4, q5]
 
-        x1 = posx(600, 600, 600, 0, 175, 0)
+        x1 = posx(150, 150, 150, 0, 175, 0)
         x2 = posx(600, 750, 600, 0, 175, 0)
         x3 = posx(150, 600, 450, 0, 175, 0)
         x4 = posx(-300, 300, 300, 0, 175, 0)
@@ -89,7 +89,7 @@ def main(args=None):
 
                 # movejx(x1, vel=30, acc=60, sol=0)
 
-                # movel(x2, velx, accx)
+                movel(x1, velx, accx)
 
                 # movec(c1, c2, velx, accx)
 
@@ -103,7 +103,7 @@ def main(args=None):
                 
                 # moveb(b_list1, vel=150, acc=250, ref=DR_BASE, mod=DR_MV_MOD_ABS)
 
-                movej(p1, vel=100, acc=100)
+                #movej(p1, vel=100, acc=100)
 
         print('good bye!')
         rclpy.shutdown()
