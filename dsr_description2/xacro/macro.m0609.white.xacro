@@ -244,6 +244,37 @@
 			</visual>
 		</link>
 
+		<joint name="joint_fixed_attachment" type="fixed">
+      <parent link="link_6" />
+      <child link="blower_link" />
+      <origin rpy="0 0 0" xyz="0 0 0" /> 
+    </joint>
+
+    <link name="blower_link">
+			<collision>
+				<origin rpy="0 0 0" xyz="0 0 0.061" />
+				<geometry>
+					<cylinder radius="0.0625" length="0.122" />
+				</geometry>
+			</collision>
+			<visual>
+				<origin rpy="0 0 4.71238898038" xyz="0.006 0 -1.035" />
+				<geometry>
+					<mesh filename="package://dsr_description2/meshes/m0609_white/blower.stl" scale="0.001 0.001 0.001" />
+				</geometry>
+			</visual>
+      <inertial>
+        <mass value="0.1"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+      </inertial>
+    </link>
+
+		<gazebo reference="blower_link">
+      <material>Gazebo/Blue</material>
+    </gazebo>
+
+
 		<!-- end effector axis for visualization-->
 		<link name="link_6_z_rod">
 			<visual>
