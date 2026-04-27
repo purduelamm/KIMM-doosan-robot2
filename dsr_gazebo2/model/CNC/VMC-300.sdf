@@ -6,19 +6,19 @@
       <visual name="visual">
         <geometry>
           <mesh>
-            <uri>/home/robot_llam/BKyoon/working/chipblowing/arm_ws/src/scripts/meshes/VMC-300-l.obj</uri>
+            <uri>VMC-300-l.obj</uri>
             <scale>0.001 0.001 0.001</scale>
           </mesh>
         </geometry>
       </visual>
-      <!-- <collision name="collision"> -->
-        <!-- <geometry> -->
-          <!-- <mesh> -->
-            <!-- <uri>/home/robot_llam/BKyoon/working/chipblowing/arm_ws/src/scripts/meshes/VMC-300-l.stl</uri> -->
-            <!-- <scale>0.001 0.001 0.001</scale> -->
-          <!-- </mesh> -->
-        <!-- </geometry> -->
-      <!-- </collision> -->
+      <collision name="collision">
+        <geometry>
+          <mesh>
+            <uri>VMC-300-l.obj</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </collision>
 
       <sensor name="contact_sensor" type="contact">
         <contact>
