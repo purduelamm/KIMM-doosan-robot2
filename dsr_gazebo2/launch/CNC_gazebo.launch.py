@@ -52,11 +52,17 @@ def generate_launch_description():
     gui = LaunchConfiguration("gui")
 
     # gazebo
+    cam_sdf_path = PathJoinSubstitution([
+        FindPackageShare('dsr_gazebo2'),
+        'model/CNC',          # Folder inside your package's share directory
+        'empty_with_cam.sdf'       # The file name
+    ])
+
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             [FindPackageShare("ros_gz_sim"), "/launch/gz_sim.launch.py"]
         ),
-        launch_arguments={"gz_args": " -r -v 3 ~/BKyoon/working/chipblowing/empty_with_cam.sdf"}.items(),
+        launch_arguments={"gz_args": ["-r -v 3 ", cam_sdf_path]}.items(),
     )
 
     # spawn robot arm
@@ -87,13 +93,19 @@ def generate_launch_description():
         ],
     )
 
+    cnc_sdf_path = PathJoinSubstitution([
+        FindPackageShare('dsr_gazebo2'),
+        'model/CNC',          # Folder inside your package's share directory
+        'VMC-300.sdf'       # The file name
+    ])
+
     # spawn CNC
     gz_spawn_static_mesh = Node(
         package="ros_gz_sim",
         executable="create",
         output="screen",
         arguments=[
-            "-file", "/home/robot_llam/BKyoon/working/chipblowing/arm_ws/src/scripts/VMC-300.sdf",  # or use PathJoinSubstitution
+            "-file", cnc_sdf_path,  # or use PathJoinSubstitution
             "-name", "CNC",
             "-x", "0.0",
             "-y", "0.0",
