@@ -65,6 +65,7 @@
   <disable_collisions link1="link_4" link2="link_5" reason="Adjacent"/>
   <disable_collisions link1="link_4" link2="link_6" reason="Never"/>
   <disable_collisions link1="link_5" link2="link_6" reason="Adjacent"/>
+  <disable_collisions link1="blower_link" link2="link_6" reason="Adjacent" />
 
   <xacro:if value="${grip == 'robotiq_2f85'}">
     <disable_collisions link1="robotiq_85_base_link" link2="link_6" reason="Adjacent"/>
