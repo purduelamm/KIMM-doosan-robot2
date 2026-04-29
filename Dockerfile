@@ -24,6 +24,9 @@ RUN apt-get update && apt-get install -y \
     ros-jazzy-moveit-configs-utils \
     ros-jazzy-moveit-ros-move-group \
     ros-jazzy-example-interfaces \
+    ros-jazzy-librealsense2* \
+    ros-jazzy-realsense2-camera \
+    ros-jazzy-realsense2-description \
     vim \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
