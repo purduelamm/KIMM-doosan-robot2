@@ -27,6 +27,12 @@ RUN apt-get update && apt-get install -y \
     ros-jazzy-librealsense2* \
     ros-jazzy-realsense2-camera \
     ros-jazzy-realsense2-description \
+    libglvnd0 \
+    libgl1 \
+    libglx0 \
+    libegl1 \
+    x11-apps \
+    mesa-utils \
     vim \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*

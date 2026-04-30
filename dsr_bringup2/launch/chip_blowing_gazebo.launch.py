@@ -19,12 +19,13 @@
 import os
 
 from launch import LaunchDescription
-from launch.actions import RegisterEventHandler,DeclareLaunchArgument
+from launch.actions import RegisterEventHandler,DeclareLaunchArgument, LogInfo
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import Command, FindExecutable, PathJoinSubstitution, LaunchConfiguration, PythonExpression
 from launch.conditions import IfCondition, UnlessCondition
 
 from launch_ros.actions import Node, SetRemap
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 from launch.actions import IncludeLaunchDescription, SetLaunchConfiguration, GroupAction
@@ -32,12 +33,58 @@ from launch.actions import IncludeLaunchDescription, SetLaunchConfiguration, Gro
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.actions import OpaqueFunction
 from launch.launch_context import LaunchContext
+from moveit_configs_utils import MoveItConfigsBuilder
 from dsr_bringup2.utils import read_update_rate, show_git_info
 
 def print_launch_configuration_value(context, *args, **kwargs):
     gz_value = LaunchConfiguration('gz').perform(context)
     print(f'LaunchConfiguration gz: {gz_value}')
     return gz_value
+
+def move_group_fn(context):
+    model_value = LaunchConfiguration('model').perform(context)
+    package_name = f"dsr_moveit_config_{model_value}"
+
+    moveit_config = (
+        MoveItConfigsBuilder(model_value, "robot_description", package_name)
+        .robot_description(file_path=f"config/{model_value}.urdf.xacro")
+        .robot_description_semantic(file_path="config/dsr.srdf.xacro", mappings={'gripper': LaunchConfiguration('gripper')})
+        .trajectory_execution(file_path="config/moveit_controllers.yaml")
+        .planning_pipelines(
+            pipelines=["ompl", "chomp"],
+            default_planning_pipeline="ompl",
+            load_all=False,
+        )
+        .to_moveit_configs()
+    )
+
+    robot_description = ParameterValue(
+        Command([
+            "xacro",
+            " ",
+            PathJoinSubstitution([
+                FindPackageShare("dsr_description2"),
+                "xacro",
+                LaunchConfiguration('model'),
+            ]),
+            ".urdf.xacro color:=",
+            LaunchConfiguration('color'),
+        ]),
+        value_type=str,
+    )
+
+    return [
+        Node(
+            package="moveit_ros_move_group",
+            executable="move_group",
+            namespace=LaunchConfiguration('name'),
+            output="screen",
+            parameters=[
+                moveit_config.to_dict(),
+                {"robot_description": robot_description},
+            ],
+        )
+    ]
 
 def generate_launch_description():
     ARGUMENTS =[ 
@@ -56,6 +103,7 @@ def generate_launch_description():
         DeclareLaunchArgument('P',            default_value = '0',              description = 'Location Pitch on Gazebo'),
         DeclareLaunchArgument('Y',            default_value = '3.141519',              description = 'Location Yaw on Gazebo'  ),
         DeclareLaunchArgument('rt_host',      default_value = '192.168.137.50', description = 'ROBOT_RT_IP'             ),
+        DeclareLaunchArgument('gripper',      default_value = 'none',           description = 'GRIPPER'                 ),
         DeclareLaunchArgument('use_sim_time', default_value='false',            description='Use simulation time'       ),
         DeclareLaunchArgument('remap_tf',     default_value = 'false',          description = 'REMAP TF'                ),
     ]
@@ -109,7 +157,7 @@ def generate_launch_description():
             {"port":    LaunchConfiguration('port')  },
             {"mode":    LaunchConfiguration('mode')  },
             {"model":   LaunchConfiguration('model') },
-            {"gripper": "none"      },
+            {"gripper": LaunchConfiguration('gripper')      },
             {"mobile":  "none"      },
             {"rt_host":  LaunchConfiguration('rt_host')      },
             {"update_rate": update_rate        },
@@ -131,7 +179,7 @@ def generate_launch_description():
             {"port":    LaunchConfiguration('port')  },
             {"mode":    LaunchConfiguration('mode')  },
             {"model":   LaunchConfiguration('model') },
-            {"gripper": "none"      },
+            {"gripper": LaunchConfiguration('gripper')      },
             {"mobile":  "none"      },
             {"rt_host":  LaunchConfiguration('rt_host')      },
             #parameters_file_path       # 파라미터 설정을 동일이름으로 launch 파일과 yaml 파일에서 할 경우 yaml 파일로 셋팅된다.    
@@ -194,6 +242,15 @@ def generate_launch_description():
         arguments=["dsr_controller2", "-c", "controller_manager"],
     )
 
+    dsr_moveit_controller_spawner = Node(
+        package="controller_manager",
+        namespace=LaunchConfiguration('name'),
+        executable="spawner",
+        arguments=["dsr_moveit_controller", "-c", "controller_manager"],
+    )
+
+    move_group_node = OpaqueFunction(function=move_group_fn)
+
     # Delay rviz start after `joint_state_broadcaster`
     delay_rviz_after_joint_state_broadcaster_spawner = RegisterEventHandler(
         event_handler=OnProcessExit(
@@ -250,7 +307,17 @@ def generate_launch_description():
         )
     )
     #========= LAUNCH FILE THAT LOADS GAZEBO ELEMENTS ==========# 
-    
+
+    delay_moveit_controller_after_robot_controller_spawner = RegisterEventHandler(
+        event_handler=OnProcessExit(
+            target_action=robot_controller_spawner,
+            on_exit=[
+                LogInfo(msg=">> dsr_controller2 active. Starting dsr_moveit_controller..."),
+                dsr_moveit_controller_spawner,
+            ],
+        )
+    )
+
     # Delay start of robot_controller after `joint_state_broadcaster`
     delay_control_node_after_connection_node = RegisterEventHandler(
         event_handler=OnProcessExit(
@@ -264,11 +331,14 @@ def generate_launch_description():
         set_config_node,
         run_emulator_node,
         gazebo_connection_node,
+        LogInfo(msg=">> Starting MoveIt2 move_group for chip blowing..."),
+        move_group_node,
         original_tf_nodes,
         remapped_tf_nodes,
         robot_controller_spawner,
         joint_state_broadcaster_spawner,
         included_launch_after_robot_controller_spawner,
+        delay_moveit_controller_after_robot_controller_spawner,
         delay_control_node_after_connection_node,
     ]
 

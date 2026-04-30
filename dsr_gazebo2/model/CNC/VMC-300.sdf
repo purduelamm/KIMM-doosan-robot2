@@ -11,18 +11,18 @@
           </mesh>
         </geometry>
       </visual>
-      <collision name="collision">
+      <!-- <collision name="collision">
         <geometry>
           <mesh>
             <uri>VMC-300-l.obj</uri>
             <scale>0.001 0.001 0.001</scale>
           </mesh>
         </geometry>
-      </collision>
+      </collision> -->
 
       <sensor name="contact_sensor" type="contact">
         <contact>
-          <collision>link_collision</collision>
+          <collision>collision</collision>
         </contact>
         <update_rate>100</update_rate>
         <plugin name="gz::sim::systems::Contact" filename="libgz-sim-contact-system.so"/>

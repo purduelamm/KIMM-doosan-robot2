@@ -1,6 +1,6 @@
 #!/bin/bash
 
-IMAGE_NAME="kimm-doosan"
+IMAGE_NAME="doosan"
 
 echo "Allowing local user to access the X Window display..."
 xhost +local:root
@@ -13,6 +13,8 @@ docker run -it --rm \
     --privileged \
     --env="DISPLAY=$DISPLAY" \
     --env="QT_X11_NO_MITSHM=1" \
+    --env="NVIDIA_VISIBLE_DEVICES=all" \
+    --env="NVIDIA_DRIVER_CAPABILITIES=graphics,display,compute,utility" \
     --volume="/dev:/dev:rw" \
     --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
     --volume="/var/run/docker.sock:/var/run/docker.sock:rw" \

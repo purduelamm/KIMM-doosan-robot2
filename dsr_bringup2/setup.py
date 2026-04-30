@@ -1,7 +1,11 @@
 from setuptools import find_packages, setup
 from glob import glob
+from os.path import isfile
 
 package_name = 'dsr_bringup2'
+
+def files(pattern):
+    return [path for path in glob(pattern) if isfile(path)]
 
 setup(
     name=package_name,
@@ -11,8 +15,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', glob('launch/*')),
-        ('share/' + package_name + '/rviz', glob('rviz/*')),
+        ('share/' + package_name + '/launch', files('launch/*')),
+        ('share/' + package_name + '/rviz', files('rviz/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
