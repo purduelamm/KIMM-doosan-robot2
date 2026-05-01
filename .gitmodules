@@ -1,0 +1,3 @@
+[submodule "KIMM_chipblowing_detection"]
+	path = KIMM_chipblowing_detection
+	url = https://github.com/purduelamm/KIMM_chipblowing_detection.git
