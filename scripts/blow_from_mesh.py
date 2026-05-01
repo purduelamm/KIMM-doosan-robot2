@@ -15,6 +15,7 @@ OUTPUT:
 
 """
 
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -60,13 +61,44 @@ from EEpose_from_mesh.mesh_utils import (
 )
 import trimesh
 import pandas as pd
+import yaml
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_CONFIG_PATH = os.path.join(SCRIPT_DIR, "config", "blow_from_mesh.yaml")
+
+# Edit this list for non-interactive runs. The optional pick_xy_from_camera()
+# helper remains available for collecting points manually.
+QUERY_PIXELS = [
+    # (640.0, 360.0),
+]
+
+
+def load_config(path: str = DEFAULT_CONFIG_PATH) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def rotation_from_config(cfg: dict) -> R:
+    if "matrix" in cfg:
+        return R.from_matrix(np.array(cfg["matrix"], dtype=float))
+    if "euler_xyz" in cfg:
+        return R.from_euler("xyz", cfg["euler_xyz"], degrees=cfg.get("degrees", False))
+    raise ValueError("Rotation config must contain 'matrix' or 'euler_xyz'.")
+
+
+def translation_from_config(cfg: dict) -> np.ndarray:
+    return np.array(cfg.get("translation", [0.0, 0.0, 0.0]), dtype=float)
+
+
+CONFIG = load_config()
 
 rclpy.init()
-ROBOT_ID = "dsr01"
-ROBOT_MODEL = "m0609"
+ROBOT_ID = CONFIG["robot"]["id"]
+ROBOT_MODEL = CONFIG["robot"]["model"]
 DR_init.__dsr__id = ROBOT_ID
 DR_init.__dsr__model = ROBOT_MODEL
-node = rclpy.create_node("coverage_path", namespace=ROBOT_ID)
+node = rclpy.create_node(CONFIG["robot"].get("node_name", "coverage_path"), namespace=ROBOT_ID)
 DR_init.__dsr__node = node
 from DSR_ROBOT2 import (
     movej,
@@ -79,78 +111,49 @@ from DSR_ROBOT2 import (
     ROBOT_MODE_AUTONOMOUS,
 )
 
-# Gazebo cam frame: X=forward, Y=left, Z=up
-# camera optical frame: X=right, Y=down, Z=forward
-GAZ_TO_OPT_R = R.from_matrix(
-    np.array(
-        [
-            [0, 0, 1],
-            [-1, 0, 0],
-            [0, -1, 0],
-        ]
-    )
-)
+TRANSFORMS = CONFIG["transforms"]
+GAZ_TO_OPT_R = rotation_from_config(TRANSFORMS["gazebo_to_optical"])
+GAZ_TO_OPT_T = translation_from_config(TRANSFORMS["gazebo_to_optical"])
+WLD_TO_BASE_R = rotation_from_config(TRANSFORMS["world_to_base"])
+WLD_TO_BASE_T = translation_from_config(TRANSFORMS["world_to_base"])
+L6_TO_CAM_R = rotation_from_config(TRANSFORMS["link_to_camera"])
+L6_TO_CAM_T = translation_from_config(TRANSFORMS["link_to_camera"])
+WLD_TO_CNC = np.array(CONFIG["mesh"].get("world_to_cnc", [0.0, 0.0, 0.0]), dtype=float)
 
-GAZ_TO_OPT_T = np.array([0, 0, 0])
-
-WLD_TO_BASE_R = R.from_euler("xyz", [0, 0, 3.141519])
-WLD_TO_BASE_T = np.array([-0.61, 0.365, 0.91])
-L6_TO_CAM_R = R.from_euler("xyz", [0, -1.5708, 3.141519])
-L6_TO_CAM_T = np.array([0.05, 0, 0.01])
-WLD_TO_CNC = np.array([0.0, 0.0, 0.0])
-
-MESH_DIMENSION = 1000  # 1 mesh unit = 0.001 m
-
-fx = 762.72
-fy = fx
-cx_k = 640
-cy_k = 360
+MESH_DIMENSION = float(CONFIG["mesh"]["dimension"])
+CAMERA_CFG = CONFIG["camera"]
+fx = float(CAMERA_CFG["intrinsics"]["fx"])
+fy = float(CAMERA_CFG["intrinsics"].get("fy", fx))
+cx_k = float(CAMERA_CFG["intrinsics"]["cx"])
+cy_k = float(CAMERA_CFG["intrinsics"]["cy"])
 camera_K = np.array([[fx, 0, cx_k], [0, fy, cy_k], [0, 0, 1]])
 
-CNC_mesh_path = "/home/robot_llam/BKyoon/working/chipblowing/arm_ws/src/doosan-robot2/scripts/meshes/VMC-300-l.obj"
+CNC_mesh_path = CONFIG["mesh"]["path"]
+if not os.path.isabs(CNC_mesh_path):
+    CNC_mesh_path = os.path.join(SCRIPT_DIR, CNC_mesh_path)
 
-IMG_TOPIC = "/camera/image_raw/compressed"
-INIT_POSX = [
-    -142.39569091796875,
-    555.5761108398438,
-    369.9364318847656,
-    81.62047576904297,
-    180.0,
-    156.6204833984375,
-]
-MOVEIT_GROUP = "manipulator"
-MOVEIT_EE_LINK = "link_6"
-MOVEIT_BASE_FRAME = "base_link"
-MOVEIT_PLANNING_SERVICE = "plan_kinematic_path"
-MOVEIT_MOVE_ACTION = "move_action"
-MOVEIT_SCENE_SERVICE = "apply_planning_scene"
-MOVEIT_SCENE_TOPIC = "planning_scene"
-MOVEIT_EXECUTE_ACTION = "execute_trajectory"
-MOVEIT_PLANNING_TIME = 8.0
-MOVEIT_PLANNING_ATTEMPTS = 10
-MOVEIT_POS_TOLERANCE = 0.003
-MOVEIT_ORI_TOLERANCE = 0.05
-CNC_COLLISION_OBJECT_ID = "cnc_mesh_obstacle"
-ALLOW_CNC_COLLISION_LINKS = ["blower_link"]
-DISABLED_SELF_COLLISION_PAIRS = [
-    ("base_link", "link_1"),
-    ("base_link", "link_3"),
-    ("link_1", "link_2"),
-    ("link_1", "link_3"),
-    ("link_1", "link_5"),
-    ("link_1", "link_6"),
-    ("link_2", "link_3"),
-    ("link_2", "link_4"),
-    ("link_2", "link_5"),
-    ("link_2", "link_6"),
-    ("link_3", "link_4"),
-    ("link_3", "link_5"),
-    ("link_3", "link_6"),
-    ("link_4", "link_5"),
-    ("link_4", "link_6"),
-    ("link_5", "link_6"),
-    ("blower_link", "link_6"),
-]
+IMG_TOPIC = CAMERA_CFG["image_topic"]
+INIT_POSX = CONFIG["robot"]["init_posx"]
+TF_SOURCE_FRAME = CONFIG["robot"]["frames"]["tf_source"]
+TF_TARGET_FRAME = CONFIG["robot"]["frames"]["tf_target"]
+MOVEIT_CFG = CONFIG["moveit"]
+MOVEIT_GROUP = MOVEIT_CFG["group"]
+MOVEIT_EE_LINK = MOVEIT_CFG["ee_link"]
+MOVEIT_BASE_FRAME = MOVEIT_CFG["base_frame"]
+MOVEIT_PLANNING_SERVICE = MOVEIT_CFG["planning_service"]
+MOVEIT_MOVE_ACTION = MOVEIT_CFG["move_action"]
+MOVEIT_SCENE_SERVICE = MOVEIT_CFG["scene_service"]
+MOVEIT_SCENE_TOPIC = MOVEIT_CFG["scene_topic"]
+MOVEIT_EXECUTE_ACTION = MOVEIT_CFG["execute_action"]
+MOVEIT_PLANNING_TIME = float(MOVEIT_CFG["planning_time"])
+MOVEIT_PLANNING_ATTEMPTS = int(MOVEIT_CFG["planning_attempts"])
+MOVEIT_POS_TOLERANCE = float(MOVEIT_CFG["position_tolerance"])
+MOVEIT_ORI_TOLERANCE = float(MOVEIT_CFG["orientation_tolerance"])
+MOVEIT_VELOCITY_SCALING = float(MOVEIT_CFG.get("velocity_scaling", 0.2))
+MOVEIT_ACCELERATION_SCALING = float(MOVEIT_CFG.get("acceleration_scaling", 0.2))
+CNC_COLLISION_OBJECT_ID = MOVEIT_CFG["collision_object_id"]
+ALLOW_CNC_COLLISION_LINKS = MOVEIT_CFG["allow_cnc_collision_links"]
+DISABLED_SELF_COLLISION_PAIRS = [tuple(pair) for pair in MOVEIT_CFG["disabled_self_collision_pairs"]]
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -189,7 +192,7 @@ def grab_image(img_topic) -> np.ndarray:
 
 
 def get_base_to_link6() -> tuple[np.ndarray, np.ndarray]:
-    """Returns (R_b_6 [3x3], t_b_6 [3])"""
+    """Returns (R_source_target [3x3], t_source_target [3])"""
     tf_buffer = Buffer()
     tf_listener = TransformListener(tf_buffer, node)
 
@@ -198,16 +201,18 @@ def get_base_to_link6() -> tuple[np.ndarray, np.ndarray]:
     while time.time() - t0 < 1.0:
         rclpy.spin_once(node, timeout_sec=0.1)
 
-    print("[tf] Waiting for base_link -> link_6 transform...")
+    print(f"[tf] Waiting for {TF_SOURCE_FRAME} -> {TF_TARGET_FRAME} transform...")
     t0 = time.time()
     while True:
         rclpy.spin_once(node, timeout_sec=0.1)
         try:
-            t = tf_buffer.lookup_transform("base_link", "link_6", rclpy.time.Time())
+            t = tf_buffer.lookup_transform(TF_SOURCE_FRAME, TF_TARGET_FRAME, rclpy.time.Time())
             break
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException):
             if time.time() - t0 > 5.0:
-                raise RuntimeError("[tf] Timed out waiting for base_link -> link_6.")
+                raise RuntimeError(
+                    f"[tf] Timed out waiting for {TF_SOURCE_FRAME} -> {TF_TARGET_FRAME}."
+                )
         except tf2_ros.ExtrapolationException as e:
             raise RuntimeError(f"[tf] Extrapolation error: {e}")
 
@@ -218,7 +223,7 @@ def get_base_to_link6() -> tuple[np.ndarray, np.ndarray]:
     rot = t.transform.rotation
     translation = np.array([trans.x, trans.y, trans.z])
     rotation = R.from_quat([rot.x, rot.y, rot.z, rot.w]).as_matrix()
-    print(f"[tf] base_link -> link_6\n  t={translation}\n  R=\n{rotation}")
+    print(f"[tf] {TF_SOURCE_FRAME} -> {TF_TARGET_FRAME}\n  t={translation}\n  R=\n{rotation}")
     return rotation, translation
 
 
@@ -305,25 +310,95 @@ def doosan_posx_to_base_se3(doosan_pose: list[float]) -> np.ndarray:
     return T
 
 
-def move_to_init(cnc_mesh: trimesh.Trimesh, T_w_b: np.ndarray):
-    print("[init] Planning collision-free move to initial posx with MoveIt2...")
-    apply_cnc_obstacle(cnc_mesh, T_w_b)
+class MotionBackend:
+    """Replace this interface to connect a different robot motion stack."""
 
-    planner_kind, planner_client = create_moveit_planner()
-    target_base_ee = doosan_posx_to_base_se3(INIT_POSX)
-    if not check_reachable(target_base_ee):
-        raise RuntimeError("[init] Initial posx failed rough reachability check.")
+    def apply_obstacles(self, cnc_mesh: trimesh.Trimesh, T_w_b: np.ndarray) -> None:
+        raise NotImplementedError
 
-    traj = plan_moveit_segment(planner_kind, planner_client, target_base_ee, None, 0)
-    init_plan = TrajectoryPlan(
-        poses=[],
-        robot_trajectories=[traj],
-        planned_with_moveit=True,
-    )
-    execute_moveit_trajectory(init_plan)
-    time.sleep(1)
-    print("[init] Moved to initial point.")
-    print("current: ", get_current_posx())
+    def plan_to_pose(self, T_base_ee: np.ndarray, start_state=None, segment_idx: int = 0):
+        raise NotImplementedError
+
+    def execute_plan(self, plan) -> None:
+        raise NotImplementedError
+
+    def move_to_init(self, init_pose: list[float], cnc_mesh: trimesh.Trimesh, T_w_b: np.ndarray):
+        target_base_ee = doosan_posx_to_base_se3(init_pose)
+        plan = self.plan_to_pose(target_base_ee, start_state=None, segment_idx=0)
+        self.execute_plan(plan)
+
+    def move_to_joints(self, joints: list[float]) -> None:
+        raise NotImplementedError
+
+
+class MoveItMotionBackend(MotionBackend):
+    """Default obstacle-aware motion backend."""
+
+    def __init__(self):
+        self.planner_kind = None
+        self.planner_client = None
+
+    def apply_obstacles(self, cnc_mesh: trimesh.Trimesh, T_w_b: np.ndarray) -> None:
+        apply_cnc_obstacle(cnc_mesh, T_w_b)
+
+    def _planner(self):
+        if self.planner_kind is None or self.planner_client is None:
+            self.planner_kind, self.planner_client = create_moveit_planner()
+        return self.planner_kind, self.planner_client
+
+    def plan_to_pose(self, T_base_ee: np.ndarray, start_state=None, segment_idx: int = 0):
+        if not check_reachable(T_base_ee):
+            raise RuntimeError(f"[moveit] Target pose {segment_idx} failed rough reachability check.")
+        planner_kind, planner_client = self._planner()
+        return plan_moveit_segment(
+            planner_kind, planner_client, T_base_ee, start_state, segment_idx
+        )
+
+    def execute_plan(self, plan) -> None:
+        if isinstance(plan, TrajectoryPlan):
+            execute_moveit_trajectory(plan)
+            return
+        execute_moveit_trajectory(
+            TrajectoryPlan(poses=[], robot_trajectories=[plan], planned_with_moveit=True)
+        )
+
+    def move_to_init(self, init_pose: list[float], cnc_mesh: trimesh.Trimesh, T_w_b: np.ndarray):
+        print("[init] Planning collision-free move to initial posx with MoveIt2...")
+        self.apply_obstacles(cnc_mesh, T_w_b)
+        super().move_to_init(init_pose, cnc_mesh, T_w_b)
+        time.sleep(1)
+        print("[init] Moved to initial point.")
+        print("current: ", get_current_posx())
+
+
+class DoosanDirectMotionBackend(MotionBackend):
+    """Editable direct-motion backend for users who want movel/movej commands."""
+
+    def apply_obstacles(self, cnc_mesh: trimesh.Trimesh, T_w_b: np.ndarray) -> None:
+        pass
+
+    def plan_to_pose(self, T_base_ee: np.ndarray, start_state=None, segment_idx: int = 0):
+        return T_base_ee
+
+    def execute_plan(self, plan) -> None:
+        if isinstance(plan, TrajectoryPlan):
+            for target in plan.robot_trajectories:
+                self.execute_plan(target)
+            return
+        doosan_pose = se3_to_doosan_posx(plan)
+        movel(posx(*doosan_pose), vel=50, acc=50)
+
+    def move_to_joints(self, joints: list[float]) -> None:
+        movej(posj(*joints), vel=60, acc=60)
+
+
+def create_motion_backend() -> MotionBackend:
+    backend_name = CONFIG.get("motion_backend", "moveit")
+    if backend_name == "moveit":
+        return MoveItMotionBackend()
+    if backend_name == "doosan_direct":
+        return DoosanDirectMotionBackend()
+    raise ValueError(f"Unsupported motion_backend '{backend_name}'.")
 
 
 # ── coordinate helpers ────────────────────────────────────────────────────────
@@ -429,6 +504,67 @@ def get_depth_from_mesh(
     hit_cam = T_cm_w @ np.append(hit_world, 1.0)
 
     return hit_cam[2]
+
+
+def compute_keyframe_from_pixel(
+    pu: float,
+    pv: float,
+    T_w_cm: np.ndarray,
+    cnc_mesh: trimesh.Trimesh,
+) -> np.ndarray:
+    z_cam = get_depth_from_mesh(pu, pv, T_w_cm, cnc_mesh)
+    print("depth: ", z_cam, " world_z: ", T_w_cm[2, 3] - z_cam)
+
+    query_world = pixel_to_world(pu, pv, z_cam, T_w_cm)
+    print(f"[main] query_world: {query_world}")
+
+    query_mesh_x, query_mesh_y = world_to_mesh(query_world)
+    query_mesh_z = query_world[2] * MESH_DIMENSION
+    print(f"[main] query_mesh_x={query_mesh_x:.2f}  query_mesh_y={query_mesh_y:.2f}")
+
+    mesh_cfg = CONFIG["mesh"]
+    normals = query_mesh_normals(
+        cnc_mesh,
+        query_mesh_x,
+        query_mesh_y,
+        mesh_cfg["normal_query_radius"],
+        total_points=mesh_cfg["normal_sample_count"],
+        z=query_mesh_z,
+    )
+
+    offset_m = float(mesh_cfg["surface_offset_m"])
+    pose = compute_se3_pose(normals, offset_m * MESH_DIMENSION)
+    normals["pose"] = pose
+
+    if CONFIG.get("visualization", {}).get("show_normals", True):
+        visualize_normals(cnc_mesh, normals, normal_length=100)
+
+    T_world_ee = pose["T"].copy()
+    T_world_ee[:3, 3] /= MESH_DIMENSION
+    return T_world_ee
+
+
+def get_query_pixels(snapshot: np.ndarray | None = None) -> list[tuple[float, float]]:
+    if QUERY_PIXELS:
+        return [(float(pu), float(pv)) for pu, pv in QUERY_PIXELS]
+
+    point_cfg = CONFIG.get("point_input", {})
+    if not point_cfg.get("use_interactive_picker_when_query_pixels_empty", False):
+        raise RuntimeError(
+            "QUERY_PIXELS is empty. Add camera pixel points near the top of "
+            "blow_from_mesh.py, for example QUERY_PIXELS = [(640.0, 360.0)]."
+        )
+
+    if snapshot is None:
+        snapshot = grab_image(IMG_TOPIC)
+
+    points = []
+    while True:
+        points.append(pick_xy_from_camera(snapshot))
+        ans = input("[loop] Add another point? [y/N]: ").strip().lower()
+        if ans != "y":
+            break
+    return points
 
 
 def match_mesh_with_world(mesh):
@@ -718,8 +854,8 @@ def plan_moveit_segment(
     motion_req.group_name = MOVEIT_GROUP
     motion_req.num_planning_attempts = MOVEIT_PLANNING_ATTEMPTS
     motion_req.allowed_planning_time = MOVEIT_PLANNING_TIME
-    motion_req.max_velocity_scaling_factor = 0.2
-    motion_req.max_acceleration_scaling_factor = 0.2
+    motion_req.max_velocity_scaling_factor = MOVEIT_VELOCITY_SCALING
+    motion_req.max_acceleration_scaling_factor = MOVEIT_ACCELERATION_SCALING
     motion_req.goal_constraints.append(make_pose_constraint(target_base_ee))
 
     if start_state is None:
@@ -739,6 +875,10 @@ def plan_moveit_segment(
 
         error_code = resp.motion_plan_response.error_code.val
         if error_code != 1:
+            print(
+                f"[moveit] NO PATH FOUND for segment {segment_idx}; "
+                f"planner returned error code {error_code}."
+            )
             raise RuntimeError(
                 f"[moveit] Segment {segment_idx} planning failed with error code {error_code}."
             )
@@ -772,6 +912,10 @@ def plan_moveit_segment(
         result = action_result.result
         error_code = result.error_code.val
         if error_code != 1:
+            print(
+                f"[moveit] NO PATH FOUND for segment {segment_idx}; "
+                f"planner returned error code {error_code}."
+            )
             raise RuntimeError(
                 f"[moveit] Segment {segment_idx} planning failed with error code {error_code}."
             )
@@ -887,6 +1031,7 @@ def generate_smooth_trajectory(
     n_interp: int = 50,
     T_w_b: np.ndarray | None = None,
     cnc_mesh: trimesh.Trimesh | None = None,
+    motion_backend: MotionBackend | None = None,
 ) -> TrajectoryPlan:
     """
     Generate a trajectory through the keyframes. When T_w_b and cnc_mesh are
@@ -902,8 +1047,8 @@ def generate_smooth_trajectory(
         print("[moveit] Missing T_w_b or CNC mesh; using Cartesian guide only.")
         return TrajectoryPlan(poses=cartesian_guide, planned_with_moveit=False)
 
-    apply_cnc_obstacle(cnc_mesh, T_w_b)
-    planner_kind, planner_client = create_moveit_planner()
+    backend = motion_backend or MoveItMotionBackend()
+    backend.apply_obstacles(cnc_mesh, T_w_b)
 
     robot_trajectories = []
     start_state = None
@@ -912,14 +1057,10 @@ def generate_smooth_trajectory(
         target_base_ee = target_base_ee.copy()
         target_base_ee[2, 3] += 0.035
 
-        if not check_reachable(target_base_ee):
-            raise RuntimeError(f"[moveit] Keyframe {i} is outside the rough reach check.")
-
-        traj = plan_moveit_segment(
-            planner_kind, planner_client, target_base_ee, start_state, i
-        )
+        traj = backend.plan_to_pose(target_base_ee, start_state=start_state, segment_idx=i)
         robot_trajectories.append(traj)
-        start_state = final_state_from_trajectory(traj)
+        if hasattr(traj, "joint_trajectory"):
+            start_state = final_state_from_trajectory(traj)
 
     return TrajectoryPlan(
         poses=cartesian_guide,
@@ -979,7 +1120,10 @@ def visualize_trajectory(
     )
 
 
-def check_reachable(T_base_ee: np.ndarray, robot_reach: float = 0.900) -> bool:
+def check_reachable(
+    T_base_ee: np.ndarray,
+    robot_reach: float = float(CONFIG["robot"].get("reach_m", 0.900)),
+) -> bool:
     """
     Rough reachability check for M0609 (max reach ~900mm).
     Returns False if too far from base or below base plane.
@@ -1094,14 +1238,13 @@ def main(args=None):
     # load CNC mesh
     CNC_mesh = trimesh.load_mesh(CNC_mesh_path)
     T_w_b = make_SE3(WLD_TO_BASE_R.as_matrix(), WLD_TO_BASE_T)
+    motion_backend = create_motion_backend()
 
     # wake up robot arm and move to initial pose
     set_robot_mode(ROBOT_MODE_AUTONOMOUS)
-    move_to_init(CNC_mesh, T_w_b)
+    motion_backend.move_to_init(INIT_POSX, CNC_mesh, T_w_b)
     time.sleep(3)
 
-    # get current camera view
-    snapshot = grab_image(IMG_TOPIC)
     # get current link 6 pose (w.r.t. BASE)
     R_b_6, t_b_6 = get_base_to_link6()
 
@@ -1114,58 +1257,18 @@ def main(args=None):
     T_w_cm = T_w_b @ T_b_6 @ T_6_cm
 
 
-    # stack keyframes
+    snapshot = None
+    if not QUERY_PIXELS and CONFIG.get("point_input", {}).get(
+        "use_interactive_picker_when_query_pixels_empty", False
+    ):
+        snapshot = grab_image(IMG_TOPIC)
+    query_pixels = get_query_pixels(snapshot)
+
     keyframes = []
-    point_idx = 0
-    while True:
+    for point_idx, (pu, pv) in enumerate(query_pixels):
         print(f"\n[loop] === Point {point_idx} ===")
-
-        # pick pixel
-        pu, pv = pick_xy_from_camera(snapshot)
         print(f"[main] Picked pixel: ({pu:.1f}, {pv:.1f})")
-
-        # depth via mesh raycasting
-        z_cam = get_depth_from_mesh(pu, pv, T_w_cm, CNC_mesh)
-        print("depth: ", z_cam, " world_z: ", T_w_cm[2, 3] - z_cam)
-
-        # pixel -> world
-        query_world = pixel_to_world(pu, pv, z_cam, T_w_cm)
-        print(f"[main] query_world: {query_world}")
-
-        # world -> mesh
-        query_mesh_x, query_mesh_y = world_to_mesh(query_world)
-        query_mesh_z = (query_world[2]) * MESH_DIMENSION
-        print(
-            f"[main] query_mesh_x={query_mesh_x:.2f}  query_mesh_y={query_mesh_y:.2f}"
-        )
-
-        # query normals
-        normals = query_mesh_normals(
-            CNC_mesh,
-            query_mesh_x,
-            query_mesh_y,
-            10,
-            total_points=5_000_000,
-            z=query_mesh_z,
-        )
-
-        # find desired SE(3)
-        d = 0.2  ## offset from query surface: 0.1m
-        pose = compute_se3_pose(normals, d * MESH_DIMENSION)
-        normals["pose"] = pose
-
-        # visualize normals and pose
-        visualize_normals(CNC_mesh, normals, normal_length=100)
-
-        # stack ee pose
-        # pose["T"] is 4×4 in mesh coords (mm), z-axis = approach direction
-        T_world_ee = pose["T"].copy()
-        T_world_ee[:3, 3] /= MESH_DIMENSION  # mm -> m
-        keyframes.append(T_world_ee)
-
-        ans = input("[loop] Add another point? [y/N]: ").strip().lower()
-        if ans != "y":
-            break
+        keyframes.append(compute_keyframe_from_pixel(pu, pv, T_w_cm, CNC_mesh))
 
     print(f"\n[traj] Collected {len(keyframes)} keyframe(s).")
 
@@ -1174,7 +1277,11 @@ def main(args=None):
 
     if len(keyframes) >= 2:
         trajectory = generate_smooth_trajectory(
-            keyframes, n_interp=50, T_w_b=T_w_b, cnc_mesh=CNC_mesh
+            keyframes,
+            n_interp=50,
+            T_w_b=T_w_b,
+            cnc_mesh=CNC_mesh,
+            motion_backend=motion_backend,
         )
         if trajectory.planned_with_moveit:
             print(
@@ -1184,16 +1291,29 @@ def main(args=None):
         else:
             print(f"[traj] Generated {len(trajectory)} interpolated poses.")
     else:
-        trajectory = keyframes
-        print("[traj] Single keyframe — skipping interpolation.")
+        target_base_ee = mesh_pose_to_base(keyframes[0], T_w_b)
+        target_base_ee = target_base_ee.copy()
+        target_base_ee[2, 3] += 0.035
+        trajectory = TrajectoryPlan(
+            poses=keyframes,
+            robot_trajectories=[motion_backend.plan_to_pose(target_base_ee)],
+            planned_with_moveit=True,
+        )
+        print("[traj] Single keyframe — planned direct segment.")
 
     # ── visualise ─────────────────────────────────────────────────────────────
-    visualize_trajectory(CNC_mesh, keyframes, trajectory, axis_len=0.2)
+    if CONFIG.get("visualization", {}).get("show_trajectory", True):
+        visualize_trajectory(
+            CNC_mesh,
+            keyframes,
+            trajectory,
+            axis_len=float(CONFIG.get("visualization", {}).get("trajectory_axis_len", 0.2)),
+        )
 
     # ── execute ───────────────────────────────────────────────────────────────
     confirm = input("[exec] Execute trajectory on robot? [y/N]: ").strip().lower()
     if confirm == "y":
-        execute_trajectory(trajectory, T_w_b, vel=50, acc=50, skip=5)
+        motion_backend.execute_plan(trajectory)
 
     rclpy.shutdown()
 

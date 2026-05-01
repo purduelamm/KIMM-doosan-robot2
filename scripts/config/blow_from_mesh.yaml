@@ -1,0 +1,94 @@
+robot:
+  id: dsr01
+  model: m0609
+  node_name: coverage_path
+  frames:
+    tf_source: base_link
+    tf_target: link_6
+  reach_m: 0.9
+  init_posx:
+    - -142.39569091796875
+    - 555.5761108398438
+    - 369.9364318847656
+    - 81.62047576904297
+    - 180.0
+    - 156.6204833984375
+
+motion_backend: moveit
+
+camera:
+  image_topic: /camera/image_raw/compressed
+  intrinsics:
+    fx: 762.72
+    fy: 762.72
+    cx: 640.0
+    cy: 360.0
+
+transforms:
+  world_to_base:
+    euler_xyz: [0.0, 0.0, 3.141519]
+    degrees: false
+    translation: [-0.61, 0.365, 0.91]
+  link_to_camera:
+    euler_xyz: [0.0, -1.5708, 3.141519]
+    degrees: false
+    translation: [0.05, 0.0, 0.01]
+  gazebo_to_optical:
+    matrix:
+      - [0.0, 0.0, 1.0]
+      - [-1.0, 0.0, 0.0]
+      - [0.0, -1.0, 0.0]
+    translation: [0.0, 0.0, 0.0]
+
+mesh:
+  path: meshes/VMC-300-l.obj
+  dimension: 1000.0
+  world_to_cnc: [0.0, 0.0, 0.0]
+  normal_query_radius: 10.0
+  normal_sample_count: 5000000
+  surface_offset_m: 0.2
+
+moveit:
+  group: manipulator
+  base_frame: base_link
+  ee_link: link_6
+  planning_service: plan_kinematic_path
+  move_action: move_action
+  scene_service: apply_planning_scene
+  scene_topic: planning_scene
+  execute_action: execute_trajectory
+  planning_time: 8.0
+  planning_attempts: 10
+  position_tolerance: 0.003
+  orientation_tolerance: 0.05
+  velocity_scaling: 0.2
+  acceleration_scaling: 0.2
+  collision_object_id: cnc_mesh_obstacle
+  allow_cnc_collision_links:
+    - blower_link
+  disabled_self_collision_pairs:
+    - [base_link, link_1]
+    - [base_link, link_3]
+    - [link_1, link_2]
+    - [link_1, link_3]
+    - [link_1, link_5]
+    - [link_1, link_6]
+    - [link_2, link_3]
+    - [link_2, link_4]
+    - [link_2, link_5]
+    - [link_2, link_6]
+    - [link_3, link_4]
+    - [link_3, link_5]
+    - [link_3, link_6]
+    - [link_4, link_5]
+    - [link_4, link_6]
+    - [link_5, link_6]
+    - [blower_link, link_6]
+
+visualization:
+  show_normals: true
+  show_trajectory: true
+  trajectory_axis_len: 0.2
+
+point_input:
+  use_interactive_picker_when_query_pixels_empty: true
