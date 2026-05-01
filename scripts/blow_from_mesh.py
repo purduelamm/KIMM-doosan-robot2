@@ -39,6 +39,7 @@ from moveit_msgs.msg import (
     BoundingVolume,
     CollisionObject,
     Constraints,
+    JointConstraint,
     MotionPlanRequest,
     OrientationConstraint,
     PlanningOptions,
@@ -47,12 +48,13 @@ from moveit_msgs.msg import (
     RobotState,
 )
 from moveit_msgs.srv import ApplyPlanningScene, GetMotionPlan
-from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import CompressedImage, Image
 from shape_msgs.msg import Mesh, MeshTriangle, SolidPrimitive
 from tf2_ros import Buffer, TransformListener
 import tf2_ros
 from visualization_msgs.msg import Marker
 import rclpy.duration
+from cv_bridge import CvBridge
 
 from EEpose_from_mesh.mesh_utils import (
     query_mesh_normals,
@@ -66,6 +68,11 @@ import yaml
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_PATH = os.path.join(SCRIPT_DIR, "config", "blow_from_mesh.yaml")
+DETECTOR_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "KIMM_chipblowing_detection")
+if DETECTOR_DIR not in sys.path:
+    sys.path.append(DETECTOR_DIR)
+
+from FitGMM import FitDepth, FitRGB_SIFT
 
 # Edit this list for non-interactive runs. The optional pick_xy_from_camera()
 # helper remains available for collecting points manually.
@@ -151,9 +158,15 @@ MOVEIT_POS_TOLERANCE = float(MOVEIT_CFG["position_tolerance"])
 MOVEIT_ORI_TOLERANCE = float(MOVEIT_CFG["orientation_tolerance"])
 MOVEIT_VELOCITY_SCALING = float(MOVEIT_CFG.get("velocity_scaling", 0.2))
 MOVEIT_ACCELERATION_SCALING = float(MOVEIT_CFG.get("acceleration_scaling", 0.2))
+MOVEIT_JOINT_NAMES = MOVEIT_CFG.get(
+    "joint_names",
+    ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"],
+)
+MOVEIT_JOINT_TOLERANCE = float(MOVEIT_CFG.get("joint_tolerance", 0.001))
 CNC_COLLISION_OBJECT_ID = MOVEIT_CFG["collision_object_id"]
 ALLOW_CNC_COLLISION_LINKS = MOVEIT_CFG["allow_cnc_collision_links"]
 DISABLED_SELF_COLLISION_PAIRS = [tuple(pair) for pair in MOVEIT_CFG["disabled_self_collision_pairs"]]
+ALL_ZERO_JOINTS = CONFIG["robot"].get("all_zero_joints", [0.0] * len(MOVEIT_JOINT_NAMES))
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -189,6 +202,224 @@ def grab_image(img_topic) -> np.ndarray:
     node.destroy_subscription(sub)
     print(f"[img] Got frame: {latest['img'].shape[1]}x{latest['img'].shape[0]}")
     return latest["img"]
+
+
+def depth_image_to_mm(depth_image: np.ndarray, unit: str = "auto") -> np.ndarray:
+    depth = depth_image.astype(np.float32)
+    if unit == "mm":
+        return depth
+    if unit == "m":
+        return depth * 1000.0
+    if unit != "auto":
+        raise ValueError(f"Unsupported depth_unit '{unit}'. Use auto, mm, or m.")
+
+    finite = depth[np.isfinite(depth) & (depth > 0)]
+    if finite.size == 0:
+        return depth
+    # RealSense float depth is usually meters; uint16 depth is usually millimeters.
+    return depth * 1000.0 if float(np.nanpercentile(finite, 95)) < 20.0 else depth
+
+
+class RGBDFrameGrabber:
+    """Stores latest RGB-D frames from RealSense topics configured in YAML."""
+
+    def __init__(self, rgb_topic: str, depth_topic: str, depth_unit: str = "auto"):
+        self.bridge = CvBridge()
+        self.depth_unit = depth_unit
+        self.latest_rgb_bgr = None
+        self.latest_depth_mm = None
+        self._depth_samples = []
+        self._collect_depth = False
+        self.rgb_sub = node.create_subscription(Image, rgb_topic, self._rgb_cb, 10)
+        self.depth_sub = node.create_subscription(Image, depth_topic, self._depth_cb, 10)
+        print(f"[rgbd] Subscribed RGB topic: {rgb_topic}")
+        print(f"[rgbd] Subscribed depth topic: {depth_topic}")
+
+    def _rgb_cb(self, msg):
+        self.latest_rgb_bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+
+    def _depth_cb(self, msg):
+        depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+        depth_mm = depth_image_to_mm(depth, self.depth_unit)
+        self.latest_depth_mm = depth_mm
+        if self._collect_depth:
+            self._depth_samples.append(depth_mm.copy())
+
+    def wait_for_frames(self, timeout_sec: float = 10.0) -> tuple[np.ndarray, np.ndarray]:
+        print("[rgbd] Waiting for RGB-D frames...")
+        t0 = time.time()
+        while self.latest_rgb_bgr is None or self.latest_depth_mm is None:
+            rclpy.spin_once(node, timeout_sec=0.1)
+            if time.time() - t0 > timeout_sec:
+                raise RuntimeError("[rgbd] Timed out waiting for RGB-D frames.")
+        return self.latest_rgb_bgr.copy(), self.latest_depth_mm.copy()
+
+    def average_depth(self, frames_to_average: int, timeout_sec: float = 10.0) -> np.ndarray:
+        frames_to_average = max(1, int(frames_to_average))
+        self._depth_samples = []
+        self._collect_depth = True
+        print(f"[rgbd] Collecting {frames_to_average} depth frame(s) for average...")
+        t0 = time.time()
+        while len(self._depth_samples) < frames_to_average:
+            rclpy.spin_once(node, timeout_sec=0.1)
+            if time.time() - t0 > timeout_sec:
+                self._collect_depth = False
+                raise RuntimeError(
+                    f"[rgbd] Timed out after collecting "
+                    f"{len(self._depth_samples)}/{frames_to_average} depth frames."
+                )
+        self._collect_depth = False
+        stacked = np.stack(self._depth_samples[:frames_to_average], axis=0)
+        averaged = np.nanmean(stacked, axis=0).astype(np.float32)
+        print(
+            "[rgbd] Averaged depth stats: "
+            f"min={np.nanmin(averaged):.2f}mm max={np.nanmax(averaged):.2f}mm"
+        )
+        return averaged
+
+
+def normalize_pdf(pdf: np.ndarray) -> np.ndarray:
+    pdf = np.asarray(pdf, dtype=np.float32)
+    pdf = np.where(np.isfinite(pdf) & (pdf > 0.0), pdf, 0.0)
+    if float(pdf.max(initial=0.0)) <= 0.0:
+        return np.zeros_like(pdf, dtype=np.float32)
+    return (pdf / float(pdf.max())).astype(np.float32)
+
+
+def roi_mask(shape: tuple[int, int], cfg: dict) -> np.ndarray:
+    height, width = shape
+    roi = cfg.get("mask_roi", {})
+    x_min = int(roi.get("x_min", 0))
+    y_min = int(roi.get("y_min", 0))
+    x_max_cfg = roi.get("x_max", width)
+    y_max_cfg = roi.get("y_max", height)
+    x_max = width if x_max_cfg is None or int(x_max_cfg) < 0 else int(x_max_cfg)
+    y_max = height if y_max_cfg is None or int(y_max_cfg) < 0 else int(y_max_cfg)
+    mask = np.zeros((height, width), dtype=bool)
+    mask[max(0, y_min):min(height, y_max), max(0, x_min):min(width, x_max)] = True
+    return mask
+
+
+class RGBDChipDetector:
+    """Depth-difference + RGB SIFT chip probability detector."""
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+
+    def detect(
+        self,
+        reference_depth_mm: np.ndarray,
+        current_depth_mm: np.ndarray,
+        current_rgb_bgr: np.ndarray,
+    ) -> np.ndarray:
+        if reference_depth_mm.shape != current_depth_mm.shape:
+            raise RuntimeError(
+                f"[detect] Depth shape mismatch: reference={reference_depth_mm.shape}, "
+                f"current={current_depth_mm.shape}"
+            )
+
+        min_valid_mm = float(self.cfg.get("min_valid_mm", 10.0))
+        mask = roi_mask(current_depth_mm.shape, self.cfg)
+        valid = (
+            mask
+            & (current_depth_mm > min_valid_mm)
+            & (reference_depth_mm > min_valid_mm)
+            & np.isfinite(current_depth_mm)
+            & np.isfinite(reference_depth_mm)
+        )
+
+        diff_mm = np.zeros_like(current_depth_mm, dtype=np.float32)
+        diff_mm[valid] = reference_depth_mm[valid] - current_depth_mm[valid]
+        print(
+            "[detect] Depth delta stats in ROI: "
+            f"valid={int(valid.sum())} max={float(np.nanmax(diff_mm)):.2f}mm"
+        )
+
+        depth_pdf = self._depth_pdf(diff_mm)
+        rgb_pdf = self._rgb_pdf(current_rgb_bgr, current_depth_mm.shape)
+        merged = (
+            float(self.cfg.get("depth_weight", 0.5)) * normalize_pdf(depth_pdf)
+            + float(self.cfg.get("rgb_weight", 0.5)) * normalize_pdf(rgb_pdf)
+        )
+        merged *= mask.astype(np.float32)
+        merged = normalize_pdf(merged)
+        if float(merged.sum()) <= 0.0:
+            raise RuntimeError("[detect] Chip detector produced an empty PDF.")
+        return merged
+
+    def _depth_pdf(self, diff_mm: np.ndarray) -> np.ndarray:
+        scale = float(self.cfg.get("depth_fit_scale", 0.5))
+        if scale != 1.0:
+            fit_map = cv2.resize(diff_mm, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+        else:
+            fit_map = diff_mm
+
+        thresh_min = float(self.cfg.get("thresh_min_mm", 1.0))
+        thresh_max = float(self.cfg.get("thresh_max_mm", 50.0))
+        candidates = (np.abs(fit_map) >= thresh_min) & (np.abs(fit_map) < thresh_max)
+        if int(candidates.sum()) == 0:
+            print("[detect] Depth PDF has no thresholded candidates; using RGB PDF only.")
+            return np.zeros(diff_mm.shape, dtype=np.float32)
+
+        depth_gmm = FitDepth(fit_map)
+        depth_gmm.fit_depth(
+            thresh_min_mm=thresh_min,
+            thresh_max_mm=thresh_max,
+            kmax=int(self.cfg.get("kmax", 3)),
+            random_state=int(self.cfg.get("random_state", 0)),
+            resample_cap=int(self.cfg.get("resample_cap", 1000)),
+        )
+        pdf = depth_gmm.gmm_to_pdf(
+            downsample_factor=int(self.cfg.get("depth_pdf_downsample_factor", 2))
+        )
+        return cv2.resize(pdf, (diff_mm.shape[1], diff_mm.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+    def _rgb_pdf(self, rgb_bgr: np.ndarray, output_shape: tuple[int, int]) -> np.ndarray:
+        if rgb_bgr is None:
+            return np.zeros(output_shape, dtype=np.float32)
+
+        scale = float(self.cfg.get("rgb_fit_scale", 0.5))
+        if scale != 1.0:
+            fit_img = cv2.resize(rgb_bgr, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+        else:
+            fit_img = rgb_bgr
+
+        rgb_gmm = FitRGB_SIFT(fit_img)
+        gmm = rgb_gmm.fit_rgb(
+            num_features=int(self.cfg.get("rgb_num_features", 500)),
+            sift_contrast=float(self.cfg.get("rgb_sift_contrast", 0.06)),
+            sift_edge=float(self.cfg.get("rgb_sift_edge", 6)),
+            n_components=int(self.cfg.get("rgb_n_components", 5)),
+        )
+        if gmm is None:
+            print("[detect] RGB SIFT found no keypoints; using depth PDF only.")
+            return np.zeros(output_shape, dtype=np.float32)
+
+        pdf = rgb_gmm.rgb_gmm_to_pdf(
+            include_outliers=bool(self.cfg.get("rgb_include_outliers", True)),
+            outlier_radius=int(self.cfg.get("rgb_outlier_radius", 15)),
+            outlier_probability=float(self.cfg.get("rgb_outlier_probability", 0.8)),
+            downsample_factor=int(self.cfg.get("rgb_pdf_downsample_factor", 2)),
+        )
+        return cv2.resize(pdf, (output_shape[1], output_shape[0]), interpolation=cv2.INTER_LINEAR)
+
+
+def sample_pixels_from_pdf(pdf: np.ndarray, sample_count: int, random_seed: int | None = None) -> list[tuple[float, float]]:
+    weights = np.asarray(pdf, dtype=np.float64)
+    weights = np.where(np.isfinite(weights) & (weights > 0.0), weights, 0.0)
+    total = float(weights.sum())
+    if total <= 0.0:
+        raise RuntimeError("[detect] Cannot sample pixels from an empty PDF.")
+
+    flat = weights.ravel() / total
+    nonzero = int(np.count_nonzero(flat))
+    count = max(1, int(sample_count))
+    rng = np.random.default_rng(random_seed)
+    idx = rng.choice(flat.size, size=count, replace=count > nonzero, p=flat)
+    ys, xs = np.unravel_index(idx, weights.shape)
+    points = [(float(x), float(y)) for x, y in zip(xs, ys)]
+    print(f"[detect] Sampled {len(points)} chip target pixel(s): {points}")
+    return points
 
 
 def get_base_to_link6() -> tuple[np.ndarray, np.ndarray]:
@@ -319,6 +550,9 @@ class MotionBackend:
     def plan_to_pose(self, T_base_ee: np.ndarray, start_state=None, segment_idx: int = 0):
         raise NotImplementedError
 
+    def plan_to_joints(self, joints: list[float], start_state=None, segment_idx: int = 0):
+        raise NotImplementedError
+
     def execute_plan(self, plan) -> None:
         raise NotImplementedError
 
@@ -328,7 +562,8 @@ class MotionBackend:
         self.execute_plan(plan)
 
     def move_to_joints(self, joints: list[float]) -> None:
-        raise NotImplementedError
+        plan = self.plan_to_joints(joints, start_state=None, segment_idx=0)
+        self.execute_plan(plan)
 
 
 class MoveItMotionBackend(MotionBackend):
@@ -354,6 +589,12 @@ class MoveItMotionBackend(MotionBackend):
             planner_kind, planner_client, T_base_ee, start_state, segment_idx
         )
 
+    def plan_to_joints(self, joints: list[float], start_state=None, segment_idx: int = 0):
+        planner_kind, planner_client = self._planner()
+        return plan_moveit_joints(
+            planner_kind, planner_client, joints, start_state, segment_idx
+        )
+
     def execute_plan(self, plan) -> None:
         if isinstance(plan, TrajectoryPlan):
             execute_moveit_trajectory(plan)
@@ -370,6 +611,11 @@ class MoveItMotionBackend(MotionBackend):
         print("[init] Moved to initial point.")
         print("current: ", get_current_posx())
 
+    def move_to_joints(self, joints: list[float]) -> None:
+        print(f"[init] Planning collision-free joint move: {joints}")
+        super().move_to_joints(joints)
+        time.sleep(1)
+
 
 class DoosanDirectMotionBackend(MotionBackend):
     """Editable direct-motion backend for users who want movel/movej commands."""
@@ -380,10 +626,16 @@ class DoosanDirectMotionBackend(MotionBackend):
     def plan_to_pose(self, T_base_ee: np.ndarray, start_state=None, segment_idx: int = 0):
         return T_base_ee
 
+    def plan_to_joints(self, joints: list[float], start_state=None, segment_idx: int = 0):
+        return list(joints)
+
     def execute_plan(self, plan) -> None:
         if isinstance(plan, TrajectoryPlan):
             for target in plan.robot_trajectories:
                 self.execute_plan(target)
+            return
+        if isinstance(plan, list) and len(plan) == len(MOVEIT_JOINT_NAMES):
+            self.move_to_joints(plan)
             return
         doosan_pose = se3_to_doosan_posx(plan)
         movel(posx(*doosan_pose), vel=50, acc=50)
@@ -542,6 +794,16 @@ def compute_keyframe_from_pixel(
     T_world_ee = pose["T"].copy()
     T_world_ee[:3, 3] /= MESH_DIMENSION
     return T_world_ee
+
+
+def get_current_camera_transform(T_w_b: np.ndarray) -> np.ndarray:
+    R_b_6, t_b_6 = get_base_to_link6()
+    T_b_6 = make_SE3(R_b_6, t_b_6)
+    T_6_cm = make_SE3(
+        (L6_TO_CAM_R * GAZ_TO_OPT_R).as_matrix(), L6_TO_CAM_T
+    )  # link 6 to camera model frame (z-forward / y-downward)
+    print("T_6_cm, ", T_6_cm)
+    return T_w_b @ T_b_6 @ T_6_cm
 
 
 def get_query_pixels(snapshot: np.ndarray | None = None) -> list[tuple[float, float]]:
@@ -752,6 +1014,25 @@ def make_pose_constraint(T_base_ee: np.ndarray) -> Constraints:
     return constraints
 
 
+def make_joint_constraint(joints: list[float]) -> Constraints:
+    if len(joints) != len(MOVEIT_JOINT_NAMES):
+        raise ValueError(
+            f"Joint target has {len(joints)} values, expected "
+            f"{len(MOVEIT_JOINT_NAMES)} for {MOVEIT_JOINT_NAMES}."
+        )
+
+    constraints = Constraints()
+    for name, position in zip(MOVEIT_JOINT_NAMES, joints):
+        joint_constraint = JointConstraint()
+        joint_constraint.joint_name = name
+        joint_constraint.position = float(position)
+        joint_constraint.tolerance_above = MOVEIT_JOINT_TOLERANCE
+        joint_constraint.tolerance_below = MOVEIT_JOINT_TOLERANCE
+        joint_constraint.weight = 1.0
+        constraints.joint_constraints.append(joint_constraint)
+    return constraints
+
+
 def mesh_to_collision_object(
     cnc_mesh: trimesh.Trimesh,
     T_w_b: np.ndarray,
@@ -923,6 +1204,90 @@ def plan_moveit_segment(
 
     print(
         f"[moveit] Segment {segment_idx} planned: "
+        f"{len(traj.joint_trajectory.points)} joint points."
+    )
+    return traj
+
+
+def plan_moveit_joints(
+    planner_kind: str,
+    planner_client,
+    joints: list[float],
+    start_state: RobotState | None,
+    segment_idx: int,
+):
+    motion_req = MotionPlanRequest()
+    motion_req.group_name = MOVEIT_GROUP
+    motion_req.num_planning_attempts = MOVEIT_PLANNING_ATTEMPTS
+    motion_req.allowed_planning_time = MOVEIT_PLANNING_TIME
+    motion_req.max_velocity_scaling_factor = MOVEIT_VELOCITY_SCALING
+    motion_req.max_acceleration_scaling_factor = MOVEIT_ACCELERATION_SCALING
+    motion_req.goal_constraints.append(make_joint_constraint(joints))
+
+    if start_state is None:
+        motion_req.start_state.is_diff = True
+    else:
+        motion_req.start_state = start_state
+
+    if planner_kind == "service":
+        req = GetMotionPlan.Request()
+        req.motion_plan_request = motion_req
+        resp = call_service_sync(
+            planner_client,
+            req,
+            MOVEIT_PLANNING_SERVICE,
+            timeout_sec=MOVEIT_PLANNING_TIME + 15.0,
+        )
+
+        error_code = resp.motion_plan_response.error_code.val
+        if error_code != 1:
+            print(
+                f"[moveit] NO PATH FOUND for joint target {segment_idx}; "
+                f"planner returned error code {error_code}."
+            )
+            raise RuntimeError(
+                f"[moveit] Joint target {segment_idx} planning failed with error code {error_code}."
+            )
+        traj = resp.motion_plan_response.trajectory
+    else:
+        goal = MoveGroup.Goal()
+        goal.request = motion_req
+        goal.planning_options = PlanningOptions()
+        goal.planning_options.plan_only = True
+
+        send_future = planner_client.send_goal_async(goal)
+        while rclpy.ok() and not send_future.done():
+            rclpy.spin_once(node, timeout_sec=0.1)
+
+        goal_handle = send_future.result()
+        if not goal_handle or not goal_handle.accepted:
+            raise RuntimeError(f"[moveit] MoveGroup rejected joint target {segment_idx}.")
+
+        result_future = goal_handle.get_result_async()
+        while rclpy.ok() and not result_future.done():
+            rclpy.spin_once(node, timeout_sec=0.1)
+
+        action_result = result_future.result()
+        if action_result.status != GoalStatus.STATUS_SUCCEEDED:
+            raise RuntimeError(
+                f"[moveit] MoveGroup action failed for joint target {segment_idx}; "
+                f"action status={action_result.status}."
+            )
+
+        result = action_result.result
+        error_code = result.error_code.val
+        if error_code != 1:
+            print(
+                f"[moveit] NO PATH FOUND for joint target {segment_idx}; "
+                f"planner returned error code {error_code}."
+            )
+            raise RuntimeError(
+                f"[moveit] Joint target {segment_idx} planning failed with error code {error_code}."
+            )
+        traj = result.planned_trajectory
+
+    print(
+        f"[moveit] Joint target {segment_idx} planned: "
         f"{len(traj.joint_trajectory.points)} joint points."
     )
     return traj
@@ -1239,30 +1604,60 @@ def main(args=None):
     CNC_mesh = trimesh.load_mesh(CNC_mesh_path)
     T_w_b = make_SE3(WLD_TO_BASE_R.as_matrix(), WLD_TO_BASE_T)
     motion_backend = create_motion_backend()
+    detector_cfg = CONFIG.get("chip_detector", {})
+    execution_cfg = CONFIG.get("execution", {})
+
+    rgbd = None
+    if detector_cfg.get("enabled", False):
+        rgbd = RGBDFrameGrabber(
+            CAMERA_CFG["rgb_topic"],
+            CAMERA_CFG["depth_topic"],
+            depth_unit=CAMERA_CFG.get("depth_unit", "auto"),
+        )
+        rgbd.wait_for_frames(timeout_sec=float(detector_cfg.get("frame_timeout_sec", 10.0)))
 
     # wake up robot arm and move to initial pose
     set_robot_mode(ROBOT_MODE_AUTONOMOUS)
     motion_backend.move_to_init(INIT_POSX, CNC_mesh, T_w_b)
     time.sleep(3)
 
-    # get current link 6 pose (w.r.t. BASE)
-    R_b_6, t_b_6 = get_base_to_link6()
+    if detector_cfg.get("enabled", False):
+        if rgbd is None:
+            raise RuntimeError("[detect] RGB-D frame grabber was not initialized.")
 
-    # build transform chain
-    T_b_6 = make_SE3(R_b_6, t_b_6)
-    T_6_cm = make_SE3(
-        (L6_TO_CAM_R * GAZ_TO_OPT_R).as_matrix(), L6_TO_CAM_T
-    )  # link 6 to camera model frame (z-forward / y-downward)
-    print("T_6_cm, ", T_6_cm)
-    T_w_cm = T_w_b @ T_b_6 @ T_6_cm
+        reference_depth = rgbd.average_depth(
+            frames_to_average=int(detector_cfg.get("frames_to_average", 30)),
+            timeout_sec=float(detector_cfg.get("reference_timeout_sec", 15.0)),
+        )
+        print("[detect] Saved reference depth image at initial pose.")
 
+        motion_backend.move_to_joints(ALL_ZERO_JOINTS)
+        input("[detect] Robot is at all-zero pose. Prepare chips, then press Enter to detect...")
 
-    snapshot = None
-    if not QUERY_PIXELS and CONFIG.get("point_input", {}).get(
-        "use_interactive_picker_when_query_pixels_empty", False
-    ):
-        snapshot = grab_image(IMG_TOPIC)
-    query_pixels = get_query_pixels(snapshot)
+        current_rgb_bgr, _ = rgbd.wait_for_frames(
+            timeout_sec=float(detector_cfg.get("frame_timeout_sec", 10.0))
+        )
+        current_depth = rgbd.average_depth(
+            frames_to_average=int(detector_cfg.get("frames_to_average", 30)),
+            timeout_sec=float(detector_cfg.get("current_timeout_sec", 15.0)),
+        )
+
+        detector = RGBDChipDetector(detector_cfg)
+        chip_pdf = detector.detect(reference_depth, current_depth, current_rgb_bgr)
+        query_pixels = sample_pixels_from_pdf(
+            chip_pdf,
+            sample_count=int(detector_cfg.get("sample_count", 5)),
+            random_seed=detector_cfg.get("sample_random_seed", None),
+        )
+        T_w_cm = get_current_camera_transform(T_w_b)
+    else:
+        T_w_cm = get_current_camera_transform(T_w_b)
+        snapshot = None
+        if not QUERY_PIXELS and CONFIG.get("point_input", {}).get(
+            "use_interactive_picker_when_query_pixels_empty", False
+        ):
+            snapshot = grab_image(IMG_TOPIC)
+        query_pixels = get_query_pixels(snapshot)
 
     keyframes = []
     for point_idx, (pu, pv) in enumerate(query_pixels):
@@ -1311,15 +1706,18 @@ def main(args=None):
         )
 
     # ── execute ───────────────────────────────────────────────────────────────
-    confirm = input("[exec] Execute trajectory on robot? [y/N]: ").strip().lower()
-    if confirm == "y":
+    if execution_cfg.get("execute_gazebo_first", True):
+        print("[exec] Executing planned trajectory on the current Gazebo backend...")
         motion_backend.execute_plan(trajectory)
+
+    if execution_cfg.get("confirm_real_execution", True):
+        confirm = input(
+            "[exec] Press y to execute the same planned trajectory on the real robot. [y/N]: "
+        ).strip().lower()
+        if confirm == "y":
+            motion_backend.execute_plan(trajectory)
 
     rclpy.shutdown()
 
 if __name__ == "__main__":
     main()
-
-"""
-TODO: merge GMM estimation
-"""

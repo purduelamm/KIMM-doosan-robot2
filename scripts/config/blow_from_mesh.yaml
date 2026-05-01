@@ -13,11 +13,15 @@ robot:
     - 81.62047576904297
     - 180.0
     - 156.6204833984375
+  all_zero_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 motion_backend: moveit
 
 camera:
   image_topic: /camera/image_raw/compressed
+  rgb_topic: /camera/camera/color/image_raw
+  depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+  depth_unit: auto
   intrinsics:
     fx: 762.72
     fy: 762.72
@@ -52,6 +56,8 @@ moveit:
   group: manipulator
   base_frame: base_link
   ee_link: link_6
+  joint_names: [joint_1, joint_2, joint_3, joint_4, joint_5, joint_6]
+  joint_tolerance: 0.001
   planning_service: plan_kinematic_path
   move_action: move_action
   scene_service: apply_planning_scene
@@ -92,3 +98,40 @@ visualization:
 
 point_input:
   use_interactive_picker_when_query_pixels_empty: true
+
+chip_detector:
+  enabled: true
+  frames_to_average: 30
+  frame_timeout_sec: 10.0
+  reference_timeout_sec: 15.0
+  current_timeout_sec: 15.0
+  min_valid_mm: 10.0
+  thresh_min_mm: 1.0
+  thresh_max_mm: 50.0
+  kmax: 3
+  random_state: 0
+  resample_cap: 1000
+  depth_fit_scale: 0.5
+  depth_pdf_downsample_factor: 2
+  rgb_fit_scale: 0.5
+  rgb_num_features: 500
+  rgb_sift_contrast: 0.06
+  rgb_sift_edge: 6
+  rgb_n_components: 5
+  rgb_include_outliers: true
+  rgb_outlier_radius: 15
+  rgb_outlier_probability: 0.8
+  rgb_pdf_downsample_factor: 2
+  depth_weight: 0.5
+  rgb_weight: 0.5
+  sample_count: 5
+  sample_random_seed: 0
+  mask_roi:
+    x_min: 200
+    x_max: -1
+    y_min: 200
+    y_max: 550
+
+execution:
+  execute_gazebo_first: true
+  confirm_real_execution: true
