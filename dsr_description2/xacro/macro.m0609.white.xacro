@@ -258,7 +258,7 @@
 				</geometry>
 			</collision>
 			<visual>
-				<origin rpy="0 0 4.71238898038" xyz="0.006 0 -1.035" />
+				<origin rpy="0 0 1.5707963267948966" xyz="-0.006 0 -1.035" />
 				<geometry>
 					<mesh filename="package://dsr_description2/meshes/m0609_white/blower.stl" scale="0.001 0.001 0.001" />
 				</geometry>
