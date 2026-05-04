@@ -13,26 +13,26 @@ robot:
     # - 81.62047576904297
     # - 180.0
     # - 156.6204833984375
-    - -113.711
-    - 466.771
-    - 483.010
-    - 98.50
-    - 134.52
-    - -4.45
+    - -108.639
+    - 452.699
+    - 501.480
+    - 104.69
+    - 142.73
+    - 1.77
   all_zero_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 motion_backend: moveit
 
 camera:
-  image_topic: /camera/image_raw/compressed
+  image_topic: /camera/camera/image_raw/compressed
   rgb_topic: /camera/camera/color/image_raw
   depth_topic: /camera/camera/aligned_depth_to_color/image_raw
   depth_unit: auto
   intrinsics:
-    fx: 762.72
-    fy: 762.72
-    cx: 640.0
-    cy: 360.0
+    fx: 611.9779052734375
+    fy: 611.1830444335938
+    cx: 315.73968505859375
+    cy: 232.30418395996094
 
 transforms:
   world_to_base:
@@ -40,21 +40,27 @@ transforms:
     degrees: false
     translation: [-0.61, 0.365, 0.91]
   link_to_camera:
-    euler_xyz: [0.0, -1.5708, 3.141519]
+    euler_xyz: [-1.5556, -0.0002, -3.1282]
     degrees: false
-    translation: [0.05, 0.0, 0.01]
+    translation: [-0.0429, 0.0389, 0.0950]
   gazebo_to_optical:
     matrix:
+      # - [0.0, 0.0, 1.0]
+      # - [-1.0, 0.0, 0.0]
+      # - [0.0, -1.0, 0.0]
+      - [1.0, 0.0, 0.0]
+      - [0.0, 1.0, 0.0]
       - [0.0, 0.0, 1.0]
-      - [-1.0, 0.0, 0.0]
-      - [0.0, -1.0, 0.0]
     translation: [0.0, 0.0, 0.0]
 
 mesh:
   path: meshes/VMC-300-l.obj
   dimension: 1000.0
   world_to_cnc: [0.0, 0.0, 0.0]
-  normal_query_radius: 10.0
+  normal_query_radius: 10.
+  velocity_scaling: 0.2
+  acceleration_scaling: 0.2
+  collision_object_id: cnc_mesh_obstacl0
   normal_sample_count: 5000000
   surface_offset_m: 0.2
 
@@ -75,7 +81,7 @@ moveit:
   orientation_tolerance: 0.05
   velocity_scaling: 0.2
   acceleration_scaling: 0.2
-  collision_object_id: cnc_mesh_obstacle
+  collision_object_id: cnc_mesh_obstacl
   allow_cnc_collision_links: []
   disabled_self_collision_pairs:
     - [base_link, link_1]
