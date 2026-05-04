@@ -80,6 +80,7 @@ QUERY_PIXELS = [
     # (640.0, 360.0),
 ]
 
+sys.path.append("/ros2_ws/src/doosan-robot2/KIMM_chipblowing_detection")
 
 def load_config(path: str = DEFAULT_CONFIG_PATH) -> dict:
     with open(path, "r", encoding="utf-8") as f:
