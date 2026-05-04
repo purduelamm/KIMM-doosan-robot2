@@ -70,8 +70,7 @@ moveit:
   velocity_scaling: 0.2
   acceleration_scaling: 0.2
   collision_object_id: cnc_mesh_obstacle
-  allow_cnc_collision_links:
-    - blower_link
+  allow_cnc_collision_links: []
   disabled_self_collision_pairs:
     - [base_link, link_1]
     - [base_link, link_3]
