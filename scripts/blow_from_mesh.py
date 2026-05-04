@@ -1607,6 +1607,11 @@ def main(args=None):
     detector_cfg = CONFIG.get("chip_detector", {})
     execution_cfg = CONFIG.get("execution", {})
 
+    # wake up robot arm and move to initial pose
+    set_robot_mode(ROBOT_MODE_AUTONOMOUS)
+    motion_backend.move_to_init(INIT_POSX, CNC_mesh, T_w_b)
+    time.sleep(3)
+
     rgbd = None
     if detector_cfg.get("enabled", False):
         rgbd = RGBDFrameGrabber(
@@ -1615,11 +1620,6 @@ def main(args=None):
             depth_unit=CAMERA_CFG.get("depth_unit", "auto"),
         )
         rgbd.wait_for_frames(timeout_sec=float(detector_cfg.get("frame_timeout_sec", 10.0)))
-
-    # wake up robot arm and move to initial pose
-    set_robot_mode(ROBOT_MODE_AUTONOMOUS)
-    motion_backend.move_to_init(INIT_POSX, CNC_mesh, T_w_b)
-    time.sleep(3)
 
     if detector_cfg.get("enabled", False):
         if rgbd is None:
