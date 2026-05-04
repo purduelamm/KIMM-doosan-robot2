@@ -605,12 +605,17 @@ class MoveItMotionBackend(MotionBackend):
         )
 
     def move_to_init(self, init_pose: list[float], cnc_mesh: trimesh.Trimesh, T_w_b: np.ndarray):
-        print("[init] Planning collision-free move to initial posx with MoveIt2...")
-        self.apply_obstacles(cnc_mesh, T_w_b)
-        super().move_to_init(init_pose, cnc_mesh, T_w_b)
-        time.sleep(1)
-        print("[init] Moved to initial point.")
-        print("current: ", get_current_posx())
+        while True:
+            try:
+                print("[init] Planning collision-free move to initial posx with MoveIt2...")
+                self.apply_obstacles(cnc_mesh, T_w_b)
+                super().move_to_init(init_pose, cnc_mesh, T_w_b)
+                time.sleep(1)
+                print("[init] Moved to initial point.")
+                print("current: ", get_current_posx())
+                break
+            except:
+                print("[init] Failed to find trajectory. Retrying...")
 
     def move_to_joints(self, joints: list[float]) -> None:
         print(f"[init] Planning collision-free joint move: {joints}")
@@ -1634,6 +1639,9 @@ def main(args=None):
 
         motion_backend.move_to_joints(ALL_ZERO_JOINTS)
         input("[detect] Robot is at all-zero pose. Prepare chips, then press Enter to detect...")
+        
+        motion_backend.move_to_init(INIT_POSX, CNC_mesh, T_w_b)
+        time.sleep(3) 
 
         current_rgb_bgr, _ = rgbd.wait_for_frames(
             timeout_sec=float(detector_cfg.get("frame_timeout_sec", 10.0))
