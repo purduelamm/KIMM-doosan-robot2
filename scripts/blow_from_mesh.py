@@ -18,6 +18,7 @@ OUTPUT:
 import os
 import sys
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from scipy.spatial.transform import Rotation as R
 from scipy.interpolate import CubicSpline
@@ -90,9 +91,11 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> dict:
 def rotation_from_config(cfg: dict) -> R:
     if "matrix" in cfg:
         return R.from_matrix(np.array(cfg["matrix"], dtype=float))
+    if "quaternion_xyzw" in cfg:
+        return R.from_quat(np.array(cfg["quaternion_xyzw"], dtype=float))
     if "euler_xyz" in cfg:
         return R.from_euler("xyz", cfg["euler_xyz"], degrees=cfg.get("degrees", False))
-    raise ValueError("Rotation config must contain 'matrix' or 'euler_xyz'.")
+    raise ValueError("Rotation config must contain 'matrix', 'quaternion_xyzw', or 'euler_xyz'.")
 
 
 def translation_from_config(cfg: dict) -> np.ndarray:
@@ -459,6 +462,53 @@ def get_base_to_link6() -> tuple[np.ndarray, np.ndarray]:
     return rotation, translation
 
 
+def lookup_link_transforms(
+    source_frame: str,
+    target_frames: list[str],
+    timeout_sec: float = 5.0,
+) -> dict[str, np.ndarray]:
+    """Return source-from-target transforms for all TF frames that are available."""
+    tf_buffer = Buffer()
+    tf_listener = TransformListener(tf_buffer, node)
+
+    print("[tf] Warming up tf buffer for debug visualization...")
+    t0 = time.time()
+    while time.time() - t0 < 1.0:
+        rclpy.spin_once(node, timeout_sec=0.1)
+
+    transforms = {}
+    if source_frame in target_frames:
+        transforms[source_frame] = np.eye(4)
+    deadline = time.time() + timeout_sec
+    pending = set(target_frames) - {source_frame}
+    while pending and time.time() < deadline:
+        rclpy.spin_once(node, timeout_sec=0.1)
+        for frame in list(pending):
+            try:
+                t = tf_buffer.lookup_transform(source_frame, frame, rclpy.time.Time())
+            except (
+                tf2_ros.LookupException,
+                tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException,
+            ):
+                continue
+
+            trans = t.transform.translation
+            rot = t.transform.rotation
+            T = np.eye(4)
+            T[:3, :3] = R.from_quat([rot.x, rot.y, rot.z, rot.w]).as_matrix()
+            T[:3, 3] = [trans.x, trans.y, trans.z]
+            transforms[frame] = T
+            pending.remove(frame)
+
+    tf_listener.unregister()
+    del tf_buffer
+
+    if pending:
+        print(f"[debug-vis] Missing TF frame(s): {sorted(pending)}")
+    return transforms
+
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 def pick_xy_from_camera(snapshot: np.ndarray) -> tuple[float, float]:
     h, w = snapshot.shape[:2]
@@ -789,6 +839,11 @@ def compute_keyframe_from_pixel(
         total_points=mesh_cfg["normal_sample_count"],
         z=query_mesh_z,
     )
+    cam_pos_mesh = T_w_cm[:3, 3] * MESH_DIMENSION
+    surface_to_camera = cam_pos_mesh - normals["surface_point"]
+    surface_to_camera_norm = np.linalg.norm(surface_to_camera)
+    if surface_to_camera_norm > 1e-12:
+        normals["view_direction"] = surface_to_camera / surface_to_camera_norm
 
     offset_m = float(mesh_cfg["surface_offset_m"])
     pose = compute_se3_pose(normals, offset_m * MESH_DIMENSION)
@@ -1491,6 +1546,273 @@ def visualize_trajectory(
     )
 
 
+def o3d_mesh_from_trimesh(mesh: trimesh.Trimesh, color: list[float]):
+    import open3d as o3d
+
+    o3d_mesh = o3d.geometry.TriangleMesh()
+    o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh.vertices)
+    o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh.faces)
+    o3d_mesh.compute_vertex_normals()
+    o3d_mesh.paint_uniform_color(color)
+    return o3d_mesh
+
+
+def load_collada_geometry_simple(path: str) -> trimesh.Trimesh | None:
+    ns = {"c": "http://www.collada.org/2005/11/COLLADASchema"}
+    try:
+        root = ET.parse(path).getroot()
+    except Exception as exc:
+        print(f"[debug-vis] Could not parse Collada file {path}: {exc}")
+        return None
+
+    geometry_meshes = {}
+    for geometry in root.findall(".//c:library_geometries/c:geometry", ns):
+        mesh_elem = geometry.find("c:mesh", ns)
+        if mesh_elem is None:
+            continue
+
+        sources = {}
+        for source in mesh_elem.findall("c:source", ns):
+            float_array = source.find("c:float_array", ns)
+            if float_array is None or not float_array.text:
+                continue
+            values = np.fromstring(float_array.text, sep=" ", dtype=np.float64)
+            if len(values) % 3 != 0:
+                continue
+            sources[source.attrib["id"]] = values.reshape((-1, 3))
+
+        vertex_sources = {}
+        for vertices in mesh_elem.findall("c:vertices", ns):
+            pos_input = vertices.find("c:input[@semantic='POSITION']", ns)
+            if pos_input is not None:
+                vertex_sources[vertices.attrib["id"]] = pos_input.attrib["source"].lstrip("#")
+
+        meshes = []
+        for triangles in mesh_elem.findall("c:triangles", ns):
+            p_elem = triangles.find("c:p", ns)
+            if p_elem is None or not p_elem.text:
+                continue
+
+            inputs = triangles.findall("c:input", ns)
+            if not inputs:
+                continue
+
+            stride = max(int(inp.attrib.get("offset", 0)) for inp in inputs) + 1
+            vertex_input = next(
+                (
+                    inp
+                    for inp in inputs
+                    if inp.attrib.get("semantic") in ("VERTEX", "POSITION")
+                ),
+                None,
+            )
+            if vertex_input is None:
+                continue
+
+            source_id = vertex_input.attrib["source"].lstrip("#")
+            if vertex_input.attrib.get("semantic") == "VERTEX":
+                source_id = vertex_sources.get(source_id)
+            if source_id not in sources:
+                continue
+
+            indices = np.fromstring(p_elem.text, sep=" ", dtype=np.int64)
+            if len(indices) % stride != 0:
+                continue
+            faces = indices.reshape((-1, stride))[:, int(vertex_input.attrib.get("offset", 0))]
+            if len(faces) % 3 != 0:
+                continue
+            faces = faces.reshape((-1, 3))
+            meshes.append(trimesh.Trimesh(vertices=sources[source_id], faces=faces, process=False))
+
+        if meshes:
+            geometry_meshes[geometry.attrib["id"]] = trimesh.util.concatenate(meshes)
+
+    if not geometry_meshes:
+        return None
+
+    scene_meshes = []
+
+    def collect_node_meshes(node: ET.Element, parent_T: np.ndarray) -> None:
+        T = parent_T.copy()
+        matrix_elem = node.find("c:matrix", ns)
+        if matrix_elem is not None and matrix_elem.text:
+            values = np.fromstring(matrix_elem.text, sep=" ", dtype=np.float64)
+            if len(values) == 16:
+                T = T @ values.reshape((4, 4))
+
+        for instance in node.findall("c:instance_geometry", ns):
+            geometry_id = instance.attrib.get("url", "").lstrip("#")
+            mesh = geometry_meshes.get(geometry_id)
+            if mesh is None:
+                continue
+            mesh = mesh.copy()
+            mesh.apply_transform(T)
+            scene_meshes.append(mesh)
+
+        for child in node.findall("c:node", ns):
+            collect_node_meshes(child, T)
+
+    visual_scene = root.find(".//c:library_visual_scenes/c:visual_scene", ns)
+    if visual_scene is not None:
+        for node_elem in visual_scene.findall("c:node", ns):
+            collect_node_meshes(node_elem, np.eye(4))
+
+    if scene_meshes:
+        return trimesh.util.concatenate(scene_meshes)
+    return trimesh.util.concatenate(list(geometry_meshes.values()))
+
+
+def load_trimesh_geometry(path: str, scale: float = 1.0) -> trimesh.Trimesh | None:
+    try:
+        loaded = trimesh.load(path, force="scene")
+    except Exception as exc:
+        if path.lower().endswith(".dae"):
+            loaded = load_collada_geometry_simple(path)
+            if loaded is None:
+                print(f"[debug-vis] Could not load {path}: {exc}")
+                return None
+        else:
+            print(f"[debug-vis] Could not load {path}: {exc}")
+            return None
+
+    if isinstance(loaded, trimesh.Scene):
+        meshes = [
+            geom.copy()
+            for geom in loaded.geometry.values()
+            if isinstance(geom, trimesh.Trimesh)
+        ]
+        if not meshes:
+            print(f"[debug-vis] No triangle geometry in {path}")
+            return None
+        mesh = trimesh.util.concatenate(meshes)
+    elif isinstance(loaded, trimesh.Trimesh):
+        mesh = loaded
+    else:
+        print(f"[debug-vis] Unsupported mesh type in {path}: {type(loaded)}")
+        return None
+
+    mesh = mesh.copy()
+    mesh.apply_scale(scale)
+    return mesh
+
+
+def robot_visual_specs() -> dict[str, list[tuple[str, float, np.ndarray]]]:
+    if ROBOT_MODEL != "m0609":
+        print(f"[debug-vis] Robot visual mesh list is not configured for {ROBOT_MODEL}.")
+        return {}
+
+    mesh_root = os.path.join(
+        os.path.dirname(SCRIPT_DIR),
+        "dsr_description2",
+        "meshes",
+        "m0609_white",
+    )
+
+    def spec(filename: str, T_link_visual: np.ndarray | None = None):
+        if T_link_visual is None:
+            T_link_visual = np.eye(4)
+        return (os.path.join(mesh_root, filename), 0.001, T_link_visual)
+
+    T_blower_visual = make_SE3(
+        R.from_euler("xyz", [0.0, 0.0, 1.5707963267948966]).as_matrix(),
+        np.array([-0.006, 0.0, -1.035]),
+    )
+
+    return {
+        "base_link": [spec("MF0609_0_0.dae")],
+        "link_1": [spec("MF0609_1_0.dae")],
+        "link_2": [
+            spec("MF0609_2_0.dae"),
+            spec("MF0609_2_1.dae"),
+            spec("MF0609_2_2.dae"),
+        ],
+        "link_3": [spec("MF0609_3_0.dae")],
+        "link_4": [
+            spec("MF0609_4_0.dae"),
+            spec("MF0609_4_1.dae"),
+        ],
+        "link_5": [spec("MF0609_5_0.dae")],
+        "link_6": [spec("MF0609_6_0.dae")],
+        "blower_link": [spec("blower.stl", T_blower_visual)],
+    }
+
+
+def visualize_debug_scene(
+    cnc_mesh: trimesh.Trimesh,
+    T_w_b: np.ndarray,
+    T_w_cm: np.ndarray,
+    axis_len: float = 0.2,
+) -> None:
+    import open3d as o3d
+
+    geometries = []
+
+    cnc_o3d = o3d_mesh_from_trimesh(cnc_mesh.copy(), [0.72, 0.72, 0.72])
+    cnc_o3d.scale(1.0 / MESH_DIMENSION, center=np.zeros(3))
+    geometries.append(cnc_o3d)
+
+    world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+        size=axis_len, origin=[0.0, 0.0, 0.0]
+    )
+    geometries.append(world_frame)
+
+    camera_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+        size=axis_len * 0.6, origin=T_w_cm[:3, 3]
+    )
+    camera_frame.rotate(T_w_cm[:3, :3], center=T_w_cm[:3, 3])
+    geometries.append(camera_frame)
+
+    specs = robot_visual_specs()
+    link_transforms = lookup_link_transforms(TF_SOURCE_FRAME, list(specs.keys()))
+    mesh_count = 0
+    link_points = []
+    for link_name, visual_specs in specs.items():
+        T_b_link = link_transforms.get(link_name)
+        if link_name == TF_SOURCE_FRAME:
+            T_b_link = np.eye(4)
+        if T_b_link is None:
+            continue
+
+        T_w_link = T_w_b @ T_b_link
+        link_points.append(T_w_link[:3, 3])
+        link_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+            size=axis_len * 0.25, origin=T_w_link[:3, 3]
+        )
+        link_frame.rotate(T_w_link[:3, :3], center=T_w_link[:3, 3])
+        geometries.append(link_frame)
+
+        for path, scale, T_link_visual in visual_specs:
+            mesh = load_trimesh_geometry(path, scale=scale)
+            if mesh is None:
+                continue
+            robot_o3d = o3d_mesh_from_trimesh(mesh, [0.95, 0.95, 0.95])
+            robot_o3d.transform(T_w_link @ T_link_visual)
+            geometries.append(robot_o3d)
+            mesh_count += 1
+
+    if len(link_points) >= 2:
+        link_points = np.array(link_points)
+        link_lines = [[i, i + 1] for i in range(len(link_points) - 1)]
+        robot_skeleton = o3d.geometry.LineSet(
+            points=o3d.utility.Vector3dVector(link_points),
+            lines=o3d.utility.Vector2iVector(link_lines),
+        )
+        robot_skeleton.paint_uniform_color([0.05, 0.05, 0.05])
+        geometries.append(robot_skeleton)
+
+    print(
+        "[debug-vis] Showing world frame, camera frame, "
+        f"{mesh_count} robot visual mesh(es), current robot link frames, and CNC mesh."
+    )
+    o3d.visualization.draw_geometries(
+        geometries,
+        window_name="Debug: World, Camera, Robot, CNC",
+        width=1280,
+        height=800,
+        mesh_show_back_face=True,
+    )
+
+
 def check_reachable(
     T_base_ee: np.ndarray,
     robot_reach: float = float(CONFIG["robot"].get("reach_m", 0.900)),
@@ -1661,6 +1983,16 @@ def main(args=None):
         T_w_cm = get_current_camera_transform(T_w_b)
     else:
         T_w_cm = get_current_camera_transform(T_w_b)
+        print("[DEBUG] T_w_cm: ", T_w_cm)
+        if CONFIG.get("visualization", {}).get("show_debug_scene", True):
+            visualize_debug_scene(
+                CNC_mesh,
+                T_w_b,
+                T_w_cm,
+                axis_len=float(
+                    CONFIG.get("visualization", {}).get("trajectory_axis_len", 0.2)
+                ),
+            )
         snapshot = None
         if not QUERY_PIXELS and CONFIG.get("point_input", {}).get(
             "use_interactive_picker_when_query_pixels_empty", False

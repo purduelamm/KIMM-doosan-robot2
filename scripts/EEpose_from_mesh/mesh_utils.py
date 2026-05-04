@@ -327,10 +327,9 @@ def compute_se3_pose(result: dict, d: float) -> dict:
          z_axis = -v                              (approach direction)
          x_axis = normalise(z_axis × world_Z)     (horizontal, perp to approach)
                   (if z_axis ∥ world_Z, fall back to world_X as reference)
-         y_axis = normalise(x_axis × z_axis)      (guarantees world_Z · y_axis >= 0
-                  because y_axis is constructed from the cross product that keeps
-                  the frame right-handed and upward)
-         Flip y_axis if world_Z · y_axis < 0.
+         y_axis = normalise(z_axis × x_axis)      (right-handed camera frame)
+         Flip y_axis if world_Z · y_axis > 0, so the camera-frame y axis points
+         downward in world coordinates while x_axis remains horizontal.
 
     Parameters
     ----------
@@ -347,12 +346,40 @@ def compute_se3_pose(result: dict, d: float) -> dict:
     """
     unique = result["unique_normals"]
     sp     = result["surface_point"]
+    if len(unique) == 0:
+        raise ValueError("No unique normals found — cannot determine approach direction.")
 
     # Step 1: sum unique normals -> v
     v_raw = unique.sum(axis=0)
     v_norm = np.linalg.norm(v_raw)
     if v_norm < 1e-12:
-        raise ValueError("Sum of unique normals is zero — cannot determine approach direction.")
+        view_dir = result.get("view_direction")
+        if view_dir is None:
+            raise ValueError(
+                "Sum of unique normals is zero — cannot determine approach direction."
+            )
+
+        view_dir = np.asarray(view_dir, dtype=np.float64)
+        view_norm = np.linalg.norm(view_dir)
+        if view_norm < 1e-12:
+            raise ValueError(
+                "Sum of unique normals is zero and view direction is invalid."
+            )
+
+        view_dir = view_dir / view_norm
+        dots = unique @ view_dir
+        best_idx = int(np.argmax(dots))
+        if dots[best_idx] <= 0.0:
+            raise ValueError(
+                "Sum of unique normals is zero and no normal faces the camera."
+            )
+
+        v_raw = unique[best_idx]
+        v_norm = np.linalg.norm(v_raw)
+        print(
+            "[compute_se3_pose] Opposing normals cancel; "
+            f"selected n[{best_idx}] facing the camera."
+        )
     v = v_raw / v_norm
 
     # Step 2: position
@@ -371,10 +398,10 @@ def compute_se3_pose(result: dict, d: float) -> dict:
         cross_norm = np.linalg.norm(cross)
     x_axis = cross / cross_norm
 
-    # y_axis: right-hand rule, ensure world_Z . y_axis >= 0
+    # y_axis: right-hand rule, ensure camera-frame y points downward in world.
     y_axis = np.cross(z_axis, x_axis)
     y_axis /= np.linalg.norm(y_axis)
-    if np.dot(world_Z, y_axis) < 0:
+    if np.dot(world_Z, y_axis) > 0:
         y_axis = -y_axis
         x_axis = np.cross(y_axis, z_axis)      # keep frame right-handed
         x_axis /= np.linalg.norm(x_axis)

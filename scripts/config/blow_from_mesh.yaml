@@ -24,7 +24,7 @@ robot:
 motion_backend: moveit
 
 camera:
-  image_topic: /camera/camera/image_raw/compressed
+  image_topic: /camera/camera/color/image_raw/compressed
   rgb_topic: /camera/camera/color/image_raw
   depth_topic: /camera/camera/aligned_depth_to_color/image_raw
   depth_unit: auto
@@ -40,17 +40,16 @@ transforms:
     degrees: false
     translation: [-0.61, 0.365, 0.91]
   link_to_camera:
-    euler_xyz: [-1.5556, -0.0002, -3.1282]
-    degrees: false
+    quaternion_xyzw: [0.0048, -0.7017, 0.7124, -0.0047]
     translation: [-0.0429, 0.0389, 0.0950]
   gazebo_to_optical:
     matrix:
       # - [0.0, 0.0, 1.0]
       # - [-1.0, 0.0, 0.0]
       # - [0.0, -1.0, 0.0]
+      - [0.0, -1.0, 0.0]
+      - [0.0, 0.0, -1.0]
       - [1.0, 0.0, 0.0]
-      - [0.0, 1.0, 0.0]
-      - [0.0, 0.0, 1.0]
     translation: [0.0, 0.0, 0.0]
 
 mesh:
@@ -105,13 +104,15 @@ moveit:
 visualization:
   show_normals: true
   show_trajectory: true
+  show_debug_scene: true
   trajectory_axis_len: 0.2
 
 point_input:
   use_interactive_picker_when_query_pixels_empty: true
 
 chip_detector:
-  enabled: true
+  # enabled: true
+  enabled: false 
   frames_to_average: 30
   frame_timeout_sec: 10.0
   reference_timeout_sec: 15.0
