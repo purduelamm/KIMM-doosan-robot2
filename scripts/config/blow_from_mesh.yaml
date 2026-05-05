@@ -64,6 +64,10 @@ mesh:
   collision_object_id: cnc_mesh_obstacl0
   normal_sample_count: 5000000
   surface_offset_m: 0.2
+  pose_mode: fixed_blower_z_axis # mesh_normal | fixed_blower_z_axis
+  fixed_blower_z_axis:
+    angle_from_world_y_deg: 45.0
+    distance_m: 0.2
 
 moveit:
   group: manipulator
