@@ -40,8 +40,10 @@ transforms:
     degrees: false
     translation: [-0.61, 0.365, 0.91]
   link_to_camera:
-    quaternion_xyzw: [0.0048, -0.7017, 0.7124, -0.0047]
-    translation: [-0.0429, 0.0389, 0.0950]
+    # quaternion_xyzw: [0.0048, -0.7017, 0.7124, -0.0047]
+    # translation: [-0.0429, 0.0389, 0.0950]
+    quaternion_xyzw: [0.0069, -0.6980, 0.7160, -0.0045]
+    translation: [-0.0336, 0.0378, 0.1082]
   gazebo_to_optical:
     matrix:
       # - [0.0, 0.0, 1.0]
@@ -78,6 +80,9 @@ moveit:
   planning_attempts: 10
   position_tolerance: 0.003
   orientation_tolerance: 0.05
+  z_axis_only_orientation: true
+  free_z_axis_tolerance: 3.14159
+  yaw_optimization_deg: [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180]
   velocity_scaling: 0.2
   acceleration_scaling: 0.2
   collision_object_id: cnc_mesh_obstacl
@@ -112,8 +117,8 @@ point_input:
   use_interactive_picker_when_query_pixels_empty: true
 
 chip_detector:
-  enabled: true
-  # enabled: false 
+  # enabled: true
+  enabled: false 
   frames_to_average: 30
   frame_timeout_sec: 10.0
   reference_timeout_sec: 15.0
