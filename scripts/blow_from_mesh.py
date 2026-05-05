@@ -1533,8 +1533,8 @@ def generate_smooth_trajectory(
     if len(poses) < 2:
         raise ValueError("Need at least 2 poses to generate a trajectory.")
 
-    cartesian_guide = generate_cartesian_guide_trajectory(poses, n_interp=n_interp)
     if T_w_b is None or cnc_mesh is None:
+        cartesian_guide = generate_cartesian_guide_trajectory(poses, n_interp=n_interp)
         print("[moveit] Missing T_w_b or CNC mesh; using Cartesian guide only.")
         return TrajectoryPlan(poses=cartesian_guide, planned_with_moveit=False)
 
@@ -1542,16 +1542,40 @@ def generate_smooth_trajectory(
     backend.apply_obstacles(cnc_mesh, T_w_b)
 
     robot_trajectories = []
+    planned_world_poses = []
+    skipped_segments = 0
     start_state = None
     for i, target_world_ee in enumerate(poses):
         target_base_ee = mesh_pose_to_base(target_world_ee, T_w_b)
         target_base_ee = target_base_ee.copy()
         # target_base_ee[2, 3] += 0.035
 
-        traj = backend.plan_to_pose(target_base_ee, start_state=start_state, segment_idx=i)
+        try:
+            traj = backend.plan_to_pose(target_base_ee, start_state=start_state, segment_idx=i)
+        except RuntimeError as exc:
+            skipped_segments += 1
+            print(f"[moveit] Skipping keypoint {i}: planning segment failed: {exc}")
+            continue
+
+        planned_world_poses.append(target_world_ee)
         robot_trajectories.append(traj)
         if hasattr(traj, "joint_trajectory"):
             start_state = final_state_from_trajectory(traj)
+
+    print(
+        f"[moveit] Planned {len(robot_trajectories)} segment(s); "
+        f"skipped {skipped_segments} failed keypoint(s)."
+    )
+    if not robot_trajectories:
+        raise RuntimeError("[moveit] No keypoints could be planned.")
+
+    if len(planned_world_poses) >= 2:
+        cartesian_guide = generate_cartesian_guide_trajectory(
+            planned_world_poses,
+            n_interp=n_interp,
+        )
+    else:
+        cartesian_guide = planned_world_poses
 
     return TrajectoryPlan(
         poses=cartesian_guide,
@@ -2162,9 +2186,17 @@ def main(args=None):
         # target_base_ee[2, 3] += 0.035
         trajectory = TrajectoryPlan(
             poses=keyframes,
-            robot_trajectories=[motion_backend.plan_to_pose(target_base_ee)],
+            robot_trajectories=[],
             planned_with_moveit=True,
         )
+        try:
+            trajectory.robot_trajectories.append(
+                motion_backend.plan_to_pose(target_base_ee)
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "[moveit] Single sampled keypoint could not be planned."
+            ) from exc
         print("[traj] Single keyframe — planned direct segment.")
 
     # ── visualise ─────────────────────────────────────────────────────────────
