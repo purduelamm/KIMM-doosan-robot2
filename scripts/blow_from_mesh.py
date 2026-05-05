@@ -68,6 +68,9 @@ import pandas as pd
 import yaml
 
 
+from tool_control import ToolControlNode
+
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_PATH = os.path.join(SCRIPT_DIR, "config", "blow_from_mesh.yaml")
 DETECTOR_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "KIMM_chipblowing_detection")
@@ -122,6 +125,8 @@ from DSR_ROBOT2 import (
     get_current_tool_flange_posx,
     ROBOT_MODE_AUTONOMOUS,
 )
+
+air_node = ToolControlNode(node)
 
 TRANSFORMS = CONFIG["transforms"]
 GAZ_TO_OPT_R = rotation_from_config(TRANSFORMS["gazebo_to_optical"])
@@ -2066,6 +2071,8 @@ def main(args=None):
     motion_backend.move_to_init(INIT_POSX, CNC_mesh, T_w_b)
     time.sleep(3)
 
+
+
     rgbd = None
     if detector_cfg.get("enabled", False):
         rgbd = RGBDFrameGrabber(
@@ -2211,7 +2218,11 @@ def main(args=None):
     # ── execute ───────────────────────────────────────────────────────────────
     if execution_cfg.get("execute_gazebo_first", True):
         print("[exec] Executing planned trajectory on the current Gazebo backend...")
+        air_node.tool_airgun(True)
+        time.sleep(1)
         motion_backend.execute_plan(trajectory)
+        air_node.tool_airgun(False)
+        time.sleep(1)
 
     if execution_cfg.get("confirm_real_execution", True):
         confirm = input(
