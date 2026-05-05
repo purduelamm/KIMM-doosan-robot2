@@ -24,6 +24,9 @@ from scipy.spatial.transform import Rotation as R
 from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Slerp
 import numpy as np
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+import matplotlib
+matplotlib.use("TkAgg", force=True)
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 import cv2
@@ -160,6 +163,15 @@ MOVEIT_PLANNING_TIME = float(MOVEIT_CFG["planning_time"])
 MOVEIT_PLANNING_ATTEMPTS = int(MOVEIT_CFG["planning_attempts"])
 MOVEIT_POS_TOLERANCE = float(MOVEIT_CFG["position_tolerance"])
 MOVEIT_ORI_TOLERANCE = float(MOVEIT_CFG["orientation_tolerance"])
+MOVEIT_Z_AXIS_ONLY_ORIENTATION = bool(MOVEIT_CFG.get("z_axis_only_orientation", True))
+MOVEIT_FREE_Z_AXIS_TOLERANCE = float(MOVEIT_CFG.get("free_z_axis_tolerance", np.pi))
+MOVEIT_YAW_OPTIMIZATION_DEG = [
+    float(v)
+    for v in MOVEIT_CFG.get(
+        "yaw_optimization_deg",
+        [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180],
+    )
+]
 MOVEIT_VELOCITY_SCALING = float(MOVEIT_CFG.get("velocity_scaling", 0.2))
 MOVEIT_ACCELERATION_SCALING = float(MOVEIT_CFG.get("acceleration_scaling", 0.2))
 MOVEIT_JOINT_NAMES = MOVEIT_CFG.get(
@@ -426,6 +438,50 @@ def sample_pixels_from_pdf(pdf: np.ndarray, sample_count: int, random_seed: int 
     return points
 
 
+def visualize_pdf_over_rgb(
+    rgb_bgr: np.ndarray,
+    pdf: np.ndarray,
+    sampled_points: list[tuple[float, float]],
+    alpha: float = 0.55,
+) -> None:
+    rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
+    pdf_norm = normalize_pdf(pdf)
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    fig.canvas.manager.set_window_title("Chip PDF over RGB")
+    ax.imshow(rgb, origin="upper")
+    heat = ax.imshow(
+        pdf_norm,
+        origin="upper",
+        cmap="turbo",
+        alpha=np.clip(pdf_norm * float(alpha), 0.0, float(alpha)),
+    )
+
+    if sampled_points:
+        xs = [p[0] for p in sampled_points]
+        ys = [p[1] for p in sampled_points]
+        ax.scatter(xs, ys, s=70, c="white", edgecolors="black", linewidths=1.4)
+        for i, (x, y) in enumerate(sampled_points):
+            ax.text(
+                x + 4.0,
+                y - 4.0,
+                str(i),
+                color="white",
+                fontsize=9,
+                weight="bold",
+                path_effects=[],
+            )
+
+    ax.set_xlim(0, rgb.shape[1])
+    ax.set_ylim(rgb.shape[0], 0)
+    ax.set_title("Chip probability PDF and sampled target pixels")
+    ax.set_xlabel("u [px]")
+    ax.set_ylabel("v [px]")
+    fig.colorbar(heat, ax=ax, fraction=0.046, pad=0.04, label="normalized PDF")
+    fig.tight_layout()
+    plt.show()
+
+
 def get_base_to_link6() -> tuple[np.ndarray, np.ndarray]:
     """Returns (R_source_target [3x3], t_source_target [3])"""
     tf_buffer = Buffer()
@@ -598,7 +654,13 @@ class MotionBackend:
     def apply_obstacles(self, cnc_mesh: trimesh.Trimesh, T_w_b: np.ndarray) -> None:
         raise NotImplementedError
 
-    def plan_to_pose(self, T_base_ee: np.ndarray, start_state=None, segment_idx: int = 0):
+    def plan_to_pose(
+        self,
+        T_base_ee: np.ndarray,
+        start_state=None,
+        segment_idx: int = 0,
+        z_axis_only: bool | None = None,
+    ):
         raise NotImplementedError
 
     def plan_to_joints(self, joints: list[float], start_state=None, segment_idx: int = 0):
@@ -609,7 +671,12 @@ class MotionBackend:
 
     def move_to_init(self, init_pose: list[float], cnc_mesh: trimesh.Trimesh, T_w_b: np.ndarray):
         target_base_ee = doosan_posx_to_base_se3(init_pose)
-        plan = self.plan_to_pose(target_base_ee, start_state=None, segment_idx=0)
+        plan = self.plan_to_pose(
+            target_base_ee,
+            start_state=None,
+            segment_idx=0,
+            z_axis_only=False,
+        )
         self.execute_plan(plan)
 
     def move_to_joints(self, joints: list[float]) -> None:
@@ -632,12 +699,25 @@ class MoveItMotionBackend(MotionBackend):
             self.planner_kind, self.planner_client = create_moveit_planner()
         return self.planner_kind, self.planner_client
 
-    def plan_to_pose(self, T_base_ee: np.ndarray, start_state=None, segment_idx: int = 0):
+    def plan_to_pose(
+        self,
+        T_base_ee: np.ndarray,
+        start_state=None,
+        segment_idx: int = 0,
+        z_axis_only: bool | None = None,
+    ):
         if not check_reachable(T_base_ee):
             raise RuntimeError(f"[moveit] Target pose {segment_idx} failed rough reachability check.")
         planner_kind, planner_client = self._planner()
+        if z_axis_only is None:
+            z_axis_only = MOVEIT_Z_AXIS_ONLY_ORIENTATION
         return plan_moveit_segment(
-            planner_kind, planner_client, T_base_ee, start_state, segment_idx
+            planner_kind,
+            planner_client,
+            T_base_ee,
+            start_state,
+            segment_idx,
+            z_axis_only=z_axis_only,
         )
 
     def plan_to_joints(self, joints: list[float], start_state=None, segment_idx: int = 0):
@@ -679,7 +759,13 @@ class DoosanDirectMotionBackend(MotionBackend):
     def apply_obstacles(self, cnc_mesh: trimesh.Trimesh, T_w_b: np.ndarray) -> None:
         pass
 
-    def plan_to_pose(self, T_base_ee: np.ndarray, start_state=None, segment_idx: int = 0):
+    def plan_to_pose(
+        self,
+        T_base_ee: np.ndarray,
+        start_state=None,
+        segment_idx: int = 0,
+        z_axis_only: bool | None = None,
+    ):
         return T_base_ee
 
     def plan_to_joints(self, joints: list[float], start_state=None, segment_idx: int = 0):
@@ -1043,7 +1129,7 @@ def make_pose_msg(T: np.ndarray) -> Pose:
     return pose
 
 
-def make_pose_constraint(T_base_ee: np.ndarray) -> Constraints:
+def make_pose_constraint(T_base_ee: np.ndarray, z_axis_only: bool = False) -> Constraints:
     pose = make_pose_msg(T_base_ee)
 
     sphere = SolidPrimitive()
@@ -1066,7 +1152,9 @@ def make_pose_constraint(T_base_ee: np.ndarray) -> Constraints:
     ori_constraint.orientation = pose.orientation
     ori_constraint.absolute_x_axis_tolerance = MOVEIT_ORI_TOLERANCE
     ori_constraint.absolute_y_axis_tolerance = MOVEIT_ORI_TOLERANCE
-    ori_constraint.absolute_z_axis_tolerance = MOVEIT_ORI_TOLERANCE
+    ori_constraint.absolute_z_axis_tolerance = (
+        MOVEIT_FREE_Z_AXIS_TOLERANCE if z_axis_only else MOVEIT_ORI_TOLERANCE
+    )
     ori_constraint.weight = 1.0
 
     constraints = Constraints()
@@ -1191,6 +1279,7 @@ def plan_moveit_segment(
     target_base_ee: np.ndarray,
     start_state: RobotState | None,
     segment_idx: int,
+    z_axis_only: bool = False,
 ):
     motion_req = MotionPlanRequest()
     motion_req.group_name = MOVEIT_GROUP
@@ -1198,7 +1287,9 @@ def plan_moveit_segment(
     motion_req.allowed_planning_time = MOVEIT_PLANNING_TIME
     motion_req.max_velocity_scaling_factor = MOVEIT_VELOCITY_SCALING
     motion_req.max_acceleration_scaling_factor = MOVEIT_ACCELERATION_SCALING
-    motion_req.goal_constraints.append(make_pose_constraint(target_base_ee))
+    motion_req.goal_constraints.append(
+        make_pose_constraint(target_base_ee, z_axis_only=z_axis_only)
+    )
 
     if start_state is None:
         motion_req.start_state.is_diff = True
@@ -1381,7 +1472,8 @@ def se3_to_doosan_posx(T_b_ee: np.ndarray) -> list:
     return [
         float(t_mm[0]),
         float(t_mm[1]),
-        float(t_mm[2] + 35),
+        # float(t_mm[2] + 35),
+        float(t_mm[2]),
         float(rz1),
         float(ry),
         float(rz2),
@@ -1396,6 +1488,45 @@ def mesh_pose_to_base(T_world_ee: np.ndarray, T_w_b: np.ndarray) -> np.ndarray:
     T_b_ee = inv(T_w_b) @ T_world_ee
     """
     return np.linalg.inv(T_w_b) @ T_world_ee
+
+
+def yaw_variants_about_tool_z(
+    T_base_ee: np.ndarray,
+    yaw_degrees: list[float] | None = None,
+) -> list[tuple[float, np.ndarray]]:
+    yaw_degrees = yaw_degrees or MOVEIT_YAW_OPTIMIZATION_DEG
+    variants = []
+    for yaw_deg in yaw_degrees:
+        T = T_base_ee.copy()
+        T[:3, :3] = T_base_ee[:3, :3] @ R.from_euler("z", yaw_deg, degrees=True).as_matrix()
+        variants.append((yaw_deg, T))
+    return variants
+
+
+def plan_reachable_pose_with_yaw_search(
+    backend: MotionBackend,
+    target_base_ee: np.ndarray,
+    start_state: RobotState | None,
+    segment_idx: int,
+) -> tuple[np.ndarray, object] | None:
+    for yaw_deg, candidate in yaw_variants_about_tool_z(target_base_ee):
+        try:
+            print(
+                f"[moveit] Segment {segment_idx}: trying yaw {yaw_deg:+.1f} deg "
+                "with position + tool-Z constraint."
+            )
+            traj = backend.plan_to_pose(
+                candidate,
+                start_state=start_state,
+                segment_idx=segment_idx,
+                z_axis_only=MOVEIT_Z_AXIS_ONLY_ORIENTATION,
+            )
+            if abs(yaw_deg) > 1e-6:
+                print(f"[moveit] Segment {segment_idx}: selected yaw {yaw_deg:+.1f} deg.")
+            return candidate, traj
+        except RuntimeError as exc:
+            print(f"[moveit] Segment {segment_idx}: yaw {yaw_deg:+.1f} deg failed: {exc}")
+    return None
 
 
 def generate_cartesian_guide_trajectory(
@@ -1468,8 +1599,8 @@ def generate_smooth_trajectory(
     if len(poses) < 2:
         raise ValueError("Need at least 2 poses to generate a trajectory.")
 
-    cartesian_guide = generate_cartesian_guide_trajectory(poses, n_interp=n_interp)
     if T_w_b is None or cnc_mesh is None:
+        cartesian_guide = generate_cartesian_guide_trajectory(poses, n_interp=n_interp)
         print("[moveit] Missing T_w_b or CNC mesh; using Cartesian guide only.")
         return TrajectoryPlan(poses=cartesian_guide, planned_with_moveit=False)
 
@@ -1477,16 +1608,39 @@ def generate_smooth_trajectory(
     backend.apply_obstacles(cnc_mesh, T_w_b)
 
     robot_trajectories = []
+    planned_world_poses = []
     start_state = None
     for i, target_world_ee in enumerate(poses):
         target_base_ee = mesh_pose_to_base(target_world_ee, T_w_b)
         target_base_ee = target_base_ee.copy()
-        target_base_ee[2, 3] += 0.035
+        # target_base_ee[2, 3] += 0.035
 
-        traj = backend.plan_to_pose(target_base_ee, start_state=start_state, segment_idx=i)
+        planned = plan_reachable_pose_with_yaw_search(
+            backend,
+            target_base_ee,
+            start_state=start_state,
+            segment_idx=i,
+        )
+        if planned is None:
+            print(f"[moveit] Skipping target {i}: no reachable yaw candidate.")
+            continue
+
+        planned_base_ee, traj = planned
+        planned_world_poses.append(T_w_b @ planned_base_ee)
         robot_trajectories.append(traj)
         if hasattr(traj, "joint_trajectory"):
             start_state = final_state_from_trajectory(traj)
+
+    if not robot_trajectories:
+        raise RuntimeError("[moveit] No sampled targets could be planned after yaw search.")
+
+    if len(planned_world_poses) >= 2:
+        cartesian_guide = generate_cartesian_guide_trajectory(
+            planned_world_poses,
+            n_interp=n_interp,
+        )
+    else:
+        cartesian_guide = planned_world_poses
 
     return TrajectoryPlan(
         poses=cartesian_guide,
@@ -1980,6 +2134,13 @@ def main(args=None):
             sample_count=int(detector_cfg.get("sample_count", 5)),
             random_seed=detector_cfg.get("sample_random_seed", None),
         )
+        if detector_cfg.get("show_pdf_overlay", True):
+            visualize_pdf_over_rgb(
+                current_rgb_bgr,
+                chip_pdf,
+                query_pixels,
+                alpha=float(detector_cfg.get("pdf_overlay_alpha", 0.55)),
+            )
         T_w_cm = get_current_camera_transform(T_w_b)
     else:
         T_w_cm = get_current_camera_transform(T_w_b)
@@ -2001,12 +2162,26 @@ def main(args=None):
         query_pixels = get_query_pixels(snapshot)
 
     keyframes = []
+    skipped_unreachable = 0
     for point_idx, (pu, pv) in enumerate(query_pixels):
         print(f"\n[loop] === Point {point_idx} ===")
         print(f"[main] Picked pixel: ({pu:.1f}, {pv:.1f})")
-        keyframes.append(compute_keyframe_from_pixel(pu, pv, T_w_cm, CNC_mesh))
+        T_world_ee = compute_keyframe_from_pixel(pu, pv, T_w_cm, CNC_mesh)
+        T_base_ee = mesh_pose_to_base(T_world_ee, T_w_b)
+        T_base_ee = T_base_ee.copy()
+        T_base_ee[2, 3] += 0.035
+        if not check_reachable(T_base_ee):
+            skipped_unreachable += 1
+            print(f"[loop] Skipping point {point_idx}: target pose is unreachable.")
+            continue
+        keyframes.append(T_world_ee)
 
-    print(f"\n[traj] Collected {len(keyframes)} keyframe(s).")
+    print(
+        f"\n[traj] Collected {len(keyframes)} reachable keyframe(s); "
+        f"skipped {skipped_unreachable} unreachable target(s)."
+    )
+    if not keyframes:
+        raise RuntimeError("[traj] No reachable keyframes found from sampled pixels.")
 
     # ── generate smooth trajectory ────────────────────────────────────────────
     keyframes = consistent_rotations(keyframes)
@@ -2029,10 +2204,21 @@ def main(args=None):
     else:
         target_base_ee = mesh_pose_to_base(keyframes[0], T_w_b)
         target_base_ee = target_base_ee.copy()
-        target_base_ee[2, 3] += 0.035
+        # target_base_ee[2, 3] += 0.035
+        motion_backend.apply_obstacles(CNC_mesh, T_w_b)
+        planned = plan_reachable_pose_with_yaw_search(
+            motion_backend,
+            target_base_ee,
+            start_state=None,
+            segment_idx=0,
+        )
+        if planned is None:
+            raise RuntimeError("[moveit] Single keyframe could not be planned after yaw search.")
+        planned_base_ee, traj = planned
+        keyframes = [T_w_b @ planned_base_ee]
         trajectory = TrajectoryPlan(
             poses=keyframes,
-            robot_trajectories=[motion_backend.plan_to_pose(target_base_ee)],
+            robot_trajectories=[traj],
             planned_with_moveit=True,
         )
         print("[traj] Single keyframe — planned direct segment.")
