@@ -82,6 +82,7 @@ moveit:
   acceleration_scaling: 0.2
   collision_object_id: cnc_mesh_obstacl
   allow_cnc_collision_links: []
+  collision_margin_m: 0.05
   disabled_self_collision_pairs:
     - [base_link, link_1]
     - [base_link, link_3]
@@ -98,7 +99,7 @@ moveit:
     - [link_3, link_6]
     - [link_4, link_5]
     - [link_4, link_6]
-    - [link_5, link_6]
+    - [link_5, link_6"]
     - [blower_link, link_6]
 
 visualization:
@@ -111,8 +112,8 @@ point_input:
   use_interactive_picker_when_query_pixels_empty: true
 
 chip_detector:
-  # enabled: true
-  enabled: false 
+  enabled: true
+  # enabled: false 
   frames_to_average: 30
   frame_timeout_sec: 10.0
   reference_timeout_sec: 15.0
@@ -138,6 +139,8 @@ chip_detector:
   rgb_weight: 0.5
   sample_count: 5
   sample_random_seed: 0
+  show_pdf_overlay: true
+  pdf_overlay_alpha: 0.55
   mask_roi:
     x_min: 200
     x_max: -1
