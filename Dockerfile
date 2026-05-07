@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y \
     ros-jazzy-librealsense2* \
     ros-jazzy-realsense2-camera \
     ros-jazzy-realsense2-description \
+    ros-jazzy-ur \
     libglvnd0 \
     libgl1 \
     libglx0 \
@@ -57,6 +58,9 @@ RUN git clone https://${GIT_TOKEN}@github.com/purduelamm/KIMM-doosan-robot2.git 
     && apt-get update \
     && rosdep install -r --from-paths . --ignore-src --rosdistro $ROS_DISTRO -y \
     && rm -rf /var/lib/apt/lists/*
+
+# Clone UR gazebo repo
+RUN git clone https://${GIT_TOKEN}@github.com/purduelamm/KIMM-UR-gazebo.git --recursive
 
 # 7. Set the working directory to the root of the workspace
 WORKDIR /ros2_ws
