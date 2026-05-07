@@ -165,3 +165,4 @@ chip_detector:
 execution:
   execute_gazebo_first: true
   confirm_real_execution: true
+  online_segment_settle_sec: 0.2

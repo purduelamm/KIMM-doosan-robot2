@@ -679,11 +679,83 @@ class MoveItMotionBackend(MotionBackend):
 
     def execute_plan(self, plan) -> None:
         if isinstance(plan, TrajectoryPlan):
+            if plan.target_base_pose_groups:
+                self.execute_target_groups_online(plan)
+                return
             execute_moveit_trajectory(plan)
             return
         execute_moveit_trajectory(
             TrajectoryPlan(poses=[], robot_trajectories=[plan], planned_with_moveit=True)
         )
+
+    def wait_for_current_state_update(self) -> None:
+        settle_sec = float(CONFIG.get("execution", {}).get("online_segment_settle_sec", 0.2))
+        if settle_sec > 0:
+            time.sleep(settle_sec)
+        rclpy.spin_once(node, timeout_sec=0.1)
+
+    def execute_target_groups_online(self, plan: "TrajectoryPlan") -> None:
+        executed = 0
+        skipped_keypoints = 0
+        skipped_cones = 0
+        for group in plan.target_base_pose_groups:
+            keypoint_idx = int(group["keypoint_idx"])
+            try:
+                print(f"[online] Planning {planned_pose_label(keypoint_idx)} from current state...")
+                keypoint_traj = self.plan_to_pose(
+                    group["keypoint_base_pose"],
+                    start_state=None,
+                    segment_idx=keypoint_idx,
+                )
+                execute_moveit_trajectory(
+                    TrajectoryPlan(
+                        poses=[],
+                        robot_trajectories=[keypoint_traj],
+                        planned_with_moveit=True,
+                    )
+                )
+                self.wait_for_current_state_update()
+                executed += 1
+            except RuntimeError as exc:
+                skipped_keypoints += 1
+                skipped_cones += len(group["cone_base_poses"])
+                print(
+                    f"[online] Skipping keypoint {keypoint_idx} and its cone sweep: {exc}"
+                )
+                continue
+
+            for cone_idx, cone_base_pose in enumerate(group["cone_base_poses"]):
+                try:
+                    print(
+                        f"[online] Planning {planned_pose_label(keypoint_idx, cone_idx)} "
+                        "from current state..."
+                    )
+                    cone_traj = self.plan_to_pose(
+                        cone_base_pose,
+                        start_state=None,
+                        segment_idx=keypoint_idx,
+                    )
+                    execute_moveit_trajectory(
+                        TrajectoryPlan(
+                            poses=[],
+                            robot_trajectories=[cone_traj],
+                            planned_with_moveit=True,
+                        )
+                    )
+                    self.wait_for_current_state_update()
+                    executed += 1
+                except RuntimeError as exc:
+                    skipped_cones += 1
+                    print(
+                        f"[online] Skipping {planned_pose_label(keypoint_idx, cone_idx)}: {exc}"
+                    )
+
+        print(
+            f"[online] Executed {executed} segment(s); "
+            f"skipped {skipped_keypoints} keypoint(s), {skipped_cones} cone pose(s)."
+        )
+        if executed == 0:
+            raise RuntimeError("[online] No target segment could be planned and executed.")
 
     def move_to_init(self, init_pose: list[float], cnc_mesh: trimesh.Trimesh, T_w_b: np.ndarray):
         while True:
@@ -986,6 +1058,7 @@ class TrajectoryPlan:
     robot_trajectories: list = field(default_factory=list)
     planned_with_moveit: bool = False
     target_poses: list[np.ndarray] = field(default_factory=list)
+    target_base_pose_groups: list[dict] = field(default_factory=list)
 
     def __len__(self):
         return len(self.poses)
@@ -1618,77 +1691,52 @@ def generate_smooth_trajectory(
     backend = motion_backend or MoveItMotionBackend()
     backend.apply_obstacles(cnc_mesh, T_w_b)
 
-    robot_trajectories = []
-    planned_world_poses = []
-    skipped_keypoints = 0
-    skipped_cones = 0
-    start_state = None
+    target_world_poses = []
+    target_base_pose_groups = []
     for i, target_world_ee in enumerate(poses):
         target_base_ee = mesh_pose_to_base(target_world_ee, T_w_b)
         target_base_ee = target_base_ee.copy()
         # target_base_ee[2, 3] += 0.035
 
-        try:
-            traj = backend.plan_to_pose(target_base_ee, start_state=start_state, segment_idx=i)
-        except RuntimeError as exc:
-            skipped_keypoints += 1
-            print(f"[moveit] Skipping keypoint {i} and its cone sweep: {exc}")
-            continue
-
-        planned_world_poses.append(target_world_ee)
-        robot_trajectories.append(traj)
-        if hasattr(traj, "joint_trajectory"):
-            start_state = final_state_from_trajectory(traj)
+        target_world_poses.append(target_world_ee)
+        group = {
+            "keypoint_idx": i,
+            "keypoint_base_pose": target_base_ee,
+            "cone_base_poses": [],
+        }
 
         try:
             cone_world_poses = cone_sweep_poses(target_world_ee)
         except RuntimeError as exc:
-            skipped_cones += 1
-            print(f"[moveit] Skipping cone sweep for keypoint {i}: {exc}")
+            print(f"[moveit] Skipping cone sweep target generation for keypoint {i}: {exc}")
             cone_world_poses = []
 
-        for cone_idx, cone_world_ee in enumerate(cone_world_poses):
+        for cone_world_ee in cone_world_poses:
             cone_base_ee = mesh_pose_to_base(cone_world_ee, T_w_b)
             cone_base_ee = cone_base_ee.copy()
-            try:
-                cone_traj = backend.plan_to_pose(
-                    cone_base_ee,
-                    start_state=start_state,
-                    segment_idx=i,
-                )
-            except RuntimeError as exc:
-                skipped_cones += 1
-                print(
-                    f"[moveit] Skipping {planned_pose_label(i, cone_idx)}: "
-                    f"planning failed: {exc}"
-                )
-                continue
+            group["cone_base_poses"].append(cone_base_ee)
+            target_world_poses.append(cone_world_ee)
 
-            planned_world_poses.append(cone_world_ee)
-            robot_trajectories.append(cone_traj)
-            if hasattr(cone_traj, "joint_trajectory"):
-                start_state = final_state_from_trajectory(cone_traj)
+        target_base_pose_groups.append(group)
 
     print(
-        f"[moveit] Planned {len(robot_trajectories)} segment(s); "
-        f"skipped {skipped_keypoints} keypoint(s), {skipped_cones} cone pose(s)."
+        f"[moveit] Prepared {len(target_base_pose_groups)} keypoint group(s) "
+        f"and {len(target_world_poses)} target pose(s) for online planning."
     )
-    if not robot_trajectories:
-        raise RuntimeError("[moveit] No keypoints could be planned.")
-
-    if len(planned_world_poses) >= 2:
+    if len(target_world_poses) >= 2:
         cartesian_guide = generate_cartesian_guide_trajectory(
-            planned_world_poses,
+            target_world_poses,
             n_interp=n_interp,
         )
     else:
-        cartesian_guide = planned_world_poses
+        cartesian_guide = target_world_poses
 
     return TrajectoryPlan(
         poses=cartesian_guide,
-        robot_trajectories=robot_trajectories,
+        robot_trajectories=[],
         planned_with_moveit=True,
-        target_poses=planned_world_poses,
+        target_poses=target_world_poses,
+        target_base_pose_groups=target_base_pose_groups,
     )
 
 
@@ -2284,8 +2332,9 @@ def main(args=None):
     )
     if trajectory.planned_with_moveit:
         print(
-            f"[traj] MoveIt planned {len(trajectory.robot_trajectories)} "
-            f"segment(s); {len(trajectory)} poses kept for visualization."
+            f"[traj] Prepared {len(trajectory.target_base_pose_groups)} "
+            f"keypoint group(s) for online MoveIt planning; "
+            f"{len(trajectory.target_poses)} target pose(s) kept for visualization."
         )
     else:
         print(f"[traj] Generated {len(trajectory)} interpolated poses.")
