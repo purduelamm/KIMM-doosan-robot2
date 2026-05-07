@@ -985,6 +985,7 @@ class TrajectoryPlan:
     poses: list[np.ndarray]
     robot_trajectories: list = field(default_factory=list)
     planned_with_moveit: bool = False
+    target_poses: list[np.ndarray] = field(default_factory=list)
 
     def __len__(self):
         return len(self.poses)
@@ -1468,6 +1469,63 @@ def mesh_pose_to_base(T_world_ee: np.ndarray, T_w_b: np.ndarray) -> np.ndarray:
     return np.linalg.inv(T_w_b) @ T_world_ee
 
 
+def cone_sweep_config() -> dict:
+    return CONFIG.get("path_actions", {}).get("cone_sweep", {})
+
+
+def cone_sweep_enabled() -> bool:
+    return bool(cone_sweep_config().get("enabled", False))
+
+
+def cone_sweep_poses(T_world_ee: np.ndarray) -> list[np.ndarray]:
+    cfg = cone_sweep_config()
+    if not bool(cfg.get("enabled", False)):
+        return []
+
+    samples = max(0, int(cfg.get("samples", 0)))
+    if samples <= 0:
+        return []
+
+    cone_angle = np.deg2rad(float(cfg.get("angle_deg", 0.0)))
+    x0 = T_world_ee[:3, 0]
+    y0 = T_world_ee[:3, 1]
+    z0 = T_world_ee[:3, 2]
+    position = T_world_ee[:3, 3]
+
+    poses = []
+    for i in range(samples):
+        phi = 2.0 * np.pi * float(i) / float(samples)
+        z_axis = (
+            np.cos(cone_angle) * z0
+            + np.sin(cone_angle) * (np.cos(phi) * x0 + np.sin(phi) * y0)
+        )
+        z_axis /= np.linalg.norm(z_axis)
+
+        x_axis = x0 - np.dot(x0, z_axis) * z_axis
+        x_norm = np.linalg.norm(x_axis)
+        if x_norm < 1e-9:
+            x_axis = y0 - np.dot(y0, z_axis) * z_axis
+            x_norm = np.linalg.norm(x_axis)
+        if x_norm < 1e-9:
+            raise RuntimeError("[cone] Cannot build cone pose frame from degenerate axes.")
+        x_axis /= x_norm
+        y_axis = np.cross(z_axis, x_axis)
+        y_axis /= np.linalg.norm(y_axis)
+
+        T = T_world_ee.copy()
+        T[:3, :3] = np.column_stack([x_axis, y_axis, z_axis])
+        T[:3, 3] = position
+        poses.append(T)
+
+    return poses
+
+
+def planned_pose_label(keypoint_idx: int, cone_idx: int | None = None) -> str:
+    if cone_idx is None:
+        return f"keypoint {keypoint_idx}"
+    return f"keypoint {keypoint_idx} cone {cone_idx}"
+
+
 def generate_cartesian_guide_trajectory(
     poses: list[np.ndarray],
     n_interp: int = 50,
@@ -1535,20 +1593,35 @@ def generate_smooth_trajectory(
     segment is planned by MoveIt2. The returned Cartesian poses are only a
     visualization guide; execution uses MoveIt's robot trajectories.
     """
-    if len(poses) < 2:
-        raise ValueError("Need at least 2 poses to generate a trajectory.")
+    if len(poses) < 1:
+        raise ValueError("Need at least 1 pose to generate a trajectory.")
 
     if T_w_b is None or cnc_mesh is None:
-        cartesian_guide = generate_cartesian_guide_trajectory(poses, n_interp=n_interp)
+        expanded_poses = []
+        for pose in poses:
+            expanded_poses.append(pose)
+            expanded_poses.extend(cone_sweep_poses(pose))
+        if len(expanded_poses) >= 2:
+            cartesian_guide = generate_cartesian_guide_trajectory(
+                expanded_poses,
+                n_interp=n_interp,
+            )
+        else:
+            cartesian_guide = expanded_poses
         print("[moveit] Missing T_w_b or CNC mesh; using Cartesian guide only.")
-        return TrajectoryPlan(poses=cartesian_guide, planned_with_moveit=False)
+        return TrajectoryPlan(
+            poses=cartesian_guide,
+            planned_with_moveit=False,
+            target_poses=expanded_poses,
+        )
 
     backend = motion_backend or MoveItMotionBackend()
     backend.apply_obstacles(cnc_mesh, T_w_b)
 
     robot_trajectories = []
     planned_world_poses = []
-    skipped_segments = 0
+    skipped_keypoints = 0
+    skipped_cones = 0
     start_state = None
     for i, target_world_ee in enumerate(poses):
         target_base_ee = mesh_pose_to_base(target_world_ee, T_w_b)
@@ -1558,8 +1631,8 @@ def generate_smooth_trajectory(
         try:
             traj = backend.plan_to_pose(target_base_ee, start_state=start_state, segment_idx=i)
         except RuntimeError as exc:
-            skipped_segments += 1
-            print(f"[moveit] Skipping keypoint {i}: planning segment failed: {exc}")
+            skipped_keypoints += 1
+            print(f"[moveit] Skipping keypoint {i} and its cone sweep: {exc}")
             continue
 
         planned_world_poses.append(target_world_ee)
@@ -1567,9 +1640,38 @@ def generate_smooth_trajectory(
         if hasattr(traj, "joint_trajectory"):
             start_state = final_state_from_trajectory(traj)
 
+        try:
+            cone_world_poses = cone_sweep_poses(target_world_ee)
+        except RuntimeError as exc:
+            skipped_cones += 1
+            print(f"[moveit] Skipping cone sweep for keypoint {i}: {exc}")
+            cone_world_poses = []
+
+        for cone_idx, cone_world_ee in enumerate(cone_world_poses):
+            cone_base_ee = mesh_pose_to_base(cone_world_ee, T_w_b)
+            cone_base_ee = cone_base_ee.copy()
+            try:
+                cone_traj = backend.plan_to_pose(
+                    cone_base_ee,
+                    start_state=start_state,
+                    segment_idx=i,
+                )
+            except RuntimeError as exc:
+                skipped_cones += 1
+                print(
+                    f"[moveit] Skipping {planned_pose_label(i, cone_idx)}: "
+                    f"planning failed: {exc}"
+                )
+                continue
+
+            planned_world_poses.append(cone_world_ee)
+            robot_trajectories.append(cone_traj)
+            if hasattr(cone_traj, "joint_trajectory"):
+                start_state = final_state_from_trajectory(cone_traj)
+
     print(
         f"[moveit] Planned {len(robot_trajectories)} segment(s); "
-        f"skipped {skipped_segments} failed keypoint(s)."
+        f"skipped {skipped_keypoints} keypoint(s), {skipped_cones} cone pose(s)."
     )
     if not robot_trajectories:
         raise RuntimeError("[moveit] No keypoints could be planned.")
@@ -1586,6 +1688,7 @@ def generate_smooth_trajectory(
         poses=cartesian_guide,
         robot_trajectories=robot_trajectories,
         planned_with_moveit=True,
+        target_poses=planned_world_poses,
     )
 
 
@@ -2172,45 +2275,26 @@ def main(args=None):
     # ── generate smooth trajectory ────────────────────────────────────────────
     keyframes = consistent_rotations(keyframes)
 
-    if len(keyframes) >= 2:
-        trajectory = generate_smooth_trajectory(
-            keyframes,
-            n_interp=50,
-            T_w_b=T_w_b,
-            cnc_mesh=CNC_mesh,
-            motion_backend=motion_backend,
+    trajectory = generate_smooth_trajectory(
+        keyframes,
+        n_interp=50,
+        T_w_b=T_w_b,
+        cnc_mesh=CNC_mesh,
+        motion_backend=motion_backend,
+    )
+    if trajectory.planned_with_moveit:
+        print(
+            f"[traj] MoveIt planned {len(trajectory.robot_trajectories)} "
+            f"segment(s); {len(trajectory)} poses kept for visualization."
         )
-        if trajectory.planned_with_moveit:
-            print(
-                f"[traj] MoveIt planned {len(trajectory.robot_trajectories)} "
-                f"segment(s); {len(trajectory)} poses kept for visualization."
-            )
-        else:
-            print(f"[traj] Generated {len(trajectory)} interpolated poses.")
     else:
-        target_base_ee = mesh_pose_to_base(keyframes[0], T_w_b)
-        target_base_ee = target_base_ee.copy()
-        # target_base_ee[2, 3] += 0.035
-        trajectory = TrajectoryPlan(
-            poses=keyframes,
-            robot_trajectories=[],
-            planned_with_moveit=True,
-        )
-        try:
-            trajectory.robot_trajectories.append(
-                motion_backend.plan_to_pose(target_base_ee)
-            )
-        except RuntimeError as exc:
-            raise RuntimeError(
-                "[moveit] Single sampled keypoint could not be planned."
-            ) from exc
-        print("[traj] Single keyframe — planned direct segment.")
+        print(f"[traj] Generated {len(trajectory)} interpolated poses.")
 
     # ── visualise ─────────────────────────────────────────────────────────────
     if CONFIG.get("visualization", {}).get("show_trajectory", True):
         visualize_trajectory(
             CNC_mesh,
-            keyframes,
+            trajectory.target_poses or keyframes,
             trajectory,
             axis_len=float(CONFIG.get("visualization", {}).get("trajectory_axis_len", 0.2)),
         )

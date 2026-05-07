@@ -69,6 +69,12 @@ mesh:
     angle_from_world_y_deg: 45.0
     distance_m: 0.2
 
+path_actions:
+  cone_sweep:
+    enabled: true
+    angle_deg: 10.0
+    samples: 8
+
 moveit:
   group: manipulator
   base_frame: base_link
@@ -121,8 +127,8 @@ point_input:
   use_interactive_picker_when_query_pixels_empty: true
 
 chip_detector:
-  enabled: true
-  # enabled: false 
+  # enabled: true
+  enabled: false 
   frames_to_average: 30
   frame_timeout_sec: 10.0
   reference_timeout_sec: 15.0
