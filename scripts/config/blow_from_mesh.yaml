@@ -127,8 +127,8 @@ point_input:
   use_interactive_picker_when_query_pixels_empty: true
 
 chip_detector:
-  # enabled: true
-  enabled: false 
+  enabled: true
+  # enabled: false 
   frames_to_average: 30
   frame_timeout_sec: 10.0
   reference_timeout_sec: 15.0
@@ -136,11 +136,11 @@ chip_detector:
   min_valid_mm: 10.0
   thresh_min_mm: 1.0
   thresh_max_mm: 50.0
-  kmax: 3
+  kmax: 5
   random_state: 0
   resample_cap: 1000
   depth_fit_scale: 0.5
-  depth_pdf_downsample_factor: 2
+  depth_pdf_downsample_factor: 1
   rgb_fit_scale: 0.5
   rgb_num_features: 500
   rgb_sift_contrast: 0.06
@@ -149,9 +149,12 @@ chip_detector:
   rgb_include_outliers: true
   rgb_outlier_radius: 15
   rgb_outlier_probability: 0.8
-  rgb_pdf_downsample_factor: 2
+  rgb_pdf_downsample_factor: 1
   depth_weight: 0.5
   rgb_weight: 0.5
+  rgb_only_outside_depth: true
+  rgb_saliency_fallback_outside_depth: true
+  require_valid_depth_for_pdf: false
   sample_count: 5
   sample_random_seed: 0
   show_pdf_overlay: true

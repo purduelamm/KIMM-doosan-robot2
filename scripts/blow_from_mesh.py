@@ -26,6 +26,12 @@ from scipy.spatial.transform import Slerp
 import numpy as np
 import cv2
 import tkinter as tk
+import matplotlib
+try:
+    matplotlib.use("TkAgg" if os.environ.get("DISPLAY") else "Agg")
+except Exception as exc:
+    print(f"[detect] Could not select preferred Matplotlib backend: {exc}")
+import matplotlib.pyplot as plt
 from PIL import Image as PILImage
 from PIL import ImageDraw, ImageTk
 from ros_gz_interfaces.srv import SpawnEntity
@@ -315,6 +321,9 @@ class RGBDChipDetector:
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
+        self.last_depth_diff_mm = None
+        self.last_depth_pdf = None
+        self.last_rgb_pdf = None
 
     def detect(
         self,
@@ -337,9 +346,22 @@ class RGBDChipDetector:
             & np.isfinite(current_depth_mm)
             & np.isfinite(reference_depth_mm)
         )
+        valid_depth_overlap = (
+            (current_depth_mm > min_valid_mm)
+            & (reference_depth_mm > min_valid_mm)
+            & np.isfinite(current_depth_mm)
+            & np.isfinite(reference_depth_mm)
+        )
+        overlap_ratio = float(valid_depth_overlap.sum()) / float(valid_depth_overlap.size)
+        print(
+            "[detect] Valid depth/color overlap: "
+            f"{100.0 * overlap_ratio:.1f}% of image "
+            f"({int(valid_depth_overlap.sum())}/{valid_depth_overlap.size} px)"
+        )
 
         diff_mm = np.zeros_like(current_depth_mm, dtype=np.float32)
         diff_mm[valid] = reference_depth_mm[valid] - current_depth_mm[valid]
+        self.last_depth_diff_mm = diff_mm.copy()
         print(
             "[detect] Depth delta stats in ROI: "
             f"valid={int(valid.sum())} max={float(np.nanmax(diff_mm)):.2f}mm"
@@ -347,11 +369,31 @@ class RGBDChipDetector:
 
         depth_pdf = self._depth_pdf(diff_mm)
         rgb_pdf = self._rgb_pdf(current_rgb_bgr, current_depth_mm.shape)
-        merged = (
-            float(self.cfg.get("depth_weight", 0.5)) * normalize_pdf(depth_pdf)
-            + float(self.cfg.get("rgb_weight", 0.5)) * normalize_pdf(rgb_pdf)
-        )
-        merged *= mask.astype(np.float32)
+        rgb_fallback_pdf = self._rgb_saliency_pdf(current_rgb_bgr, current_depth_mm.shape)
+        depth_weight = float(self.cfg.get("depth_weight", 0.5))
+        rgb_weight = float(self.cfg.get("rgb_weight", 0.5))
+        depth_norm = normalize_pdf(depth_pdf)
+        rgb_norm = normalize_pdf(rgb_pdf)
+        rgb_fallback_norm = normalize_pdf(rgb_fallback_pdf)
+        if bool(self.cfg.get("rgb_only_outside_depth", True)):
+            depth_region = valid_depth_overlap & mask
+            rgb_only_region = mask & ~valid_depth_overlap
+            if bool(self.cfg.get("rgb_saliency_fallback_outside_depth", True)):
+                rgb_norm = rgb_norm.copy()
+                rgb_norm[rgb_only_region] = np.maximum(
+                    rgb_norm[rgb_only_region],
+                    rgb_fallback_norm[rgb_only_region],
+                )
+            merged = np.zeros_like(depth_norm, dtype=np.float32)
+            merged = depth_weight * depth_norm + rgb_weight * rgb_norm
+            print(
+                "[detect] PDF regions: "
+                f"depth+rgb={int(depth_region.sum())} px, "
+                f"rgb_only={int(rgb_only_region.sum())} px, "
+                f"rgb_only_max={float(rgb_norm[rgb_only_region].max(initial=0.0)):.3f}"
+            )
+        self.last_depth_pdf = depth_norm.copy()
+        self.last_rgb_pdf = rgb_norm.copy()
         merged = normalize_pdf(merged)
         if float(merged.sum()) <= 0.0:
             raise RuntimeError("[detect] Chip detector produced an empty PDF.")
@@ -413,6 +455,22 @@ class RGBDChipDetector:
         )
         return cv2.resize(pdf, (output_shape[1], output_shape[0]), interpolation=cv2.INTER_LINEAR)
 
+    def _rgb_saliency_pdf(self, rgb_bgr: np.ndarray, output_shape: tuple[int, int]) -> np.ndarray:
+        if rgb_bgr is None:
+            return np.zeros(output_shape, dtype=np.float32)
+        gray = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        saliency = cv2.magnitude(grad_x, grad_y)
+        saliency = cv2.GaussianBlur(saliency, (0, 0), sigmaX=8.0, sigmaY=8.0)
+        saliency = cv2.resize(
+            saliency,
+            (output_shape[1], output_shape[0]),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        return normalize_pdf(saliency)
+
 
 def sample_pixels_from_pdf(pdf: np.ndarray, sample_count: int, random_seed: int | None = None) -> list[tuple[float, float]]:
     weights = np.asarray(pdf, dtype=np.float64)
@@ -432,29 +490,73 @@ def sample_pixels_from_pdf(pdf: np.ndarray, sample_count: int, random_seed: int 
     return points
 
 
-def visualize_pdf_over_rgb(
+def visualize_pdf_debug(
     rgb_bgr: np.ndarray,
+    depth_diff_mm: np.ndarray,
     pdf: np.ndarray,
+    depth_pdf: np.ndarray | None,
+    rgb_pdf: np.ndarray | None,
     sampled_points: list[tuple[float, float]],
     alpha: float = 0.55,
 ) -> None:
     rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
     pdf_norm = normalize_pdf(pdf)
+    depth_pdf_norm = normalize_pdf(depth_pdf) if depth_pdf is not None else np.zeros_like(pdf_norm)
+    rgb_pdf_norm = normalize_pdf(rgb_pdf) if rgb_pdf is not None else np.zeros_like(pdf_norm)
     heat_bgr = cv2.applyColorMap((pdf_norm * 255.0).astype(np.uint8), cv2.COLORMAP_TURBO)
     heat_rgb = cv2.cvtColor(heat_bgr, cv2.COLOR_BGR2RGB)
     alpha_map = np.clip(pdf_norm[..., None] * float(alpha), 0.0, float(alpha))
     blended = (rgb.astype(np.float32) * (1.0 - alpha_map) + heat_rgb.astype(np.float32) * alpha_map)
-    image = PILImage.fromarray(np.clip(blended, 0, 255).astype(np.uint8))
+    blended = np.clip(blended, 0, 255).astype(np.uint8)
 
-    draw = ImageDraw.Draw(image)
-    for i, (x, y) in enumerate(sampled_points):
-        x = float(x)
-        y = float(y)
-        r = 6
-        draw.ellipse((x - r, y - r, x + r, y + r), fill="white", outline="black", width=2)
-        draw.text((x + 8, y - 10), str(i), fill="white", stroke_width=2, stroke_fill="black")
+    if depth_diff_mm is None:
+        depth_diff_mm = np.zeros_like(pdf_norm, dtype=np.float32)
+    depth_diff_mm = np.asarray(depth_diff_mm, dtype=np.float32)
+    finite_depth = depth_diff_mm[np.isfinite(depth_diff_mm)]
+    if finite_depth.size:
+        depth_abs_max = float(np.percentile(np.abs(finite_depth), 99.0))
+        depth_abs_max = max(depth_abs_max, 1.0)
+    else:
+        depth_abs_max = 1.0
 
-    show_image_window("Chip PDF over RGB", image)
+    fig, axes = plt.subplots(2, 3, figsize=(16, 9), constrained_layout=True)
+    panels = [
+        ("RGB image", rgb, None, None, None),
+        ("Depth difference image", depth_diff_mm, "coolwarm", -depth_abs_max, depth_abs_max),
+        ("Depth PDF", depth_pdf_norm, "turbo", 0.0, 1.0),
+        ("RGB PDF", rgb_pdf_norm, "turbo", 0.0, 1.0),
+        ("Merged PDF", pdf_norm, "turbo", 0.0, 1.0),
+        ("Merged RGB + PDF", blended, None, None, None),
+    ]
+
+    for ax, (title, image, cmap, vmin, vmax) in zip(axes.flat, panels):
+        im = ax.imshow(image, cmap=cmap, vmin=vmin, vmax=vmax, origin="upper")
+        ax.set_title(title)
+        ax.set_xlabel("x [px]")
+        ax.set_ylabel("y [px]")
+        if title in ("Merged PDF", "Merged RGB + PDF"):
+            for i, (x, y) in enumerate(sampled_points):
+                ax.scatter([x], [y], s=70, facecolors="white", edgecolors="black", linewidths=1.5)
+                ax.text(
+                    float(x) + 8.0,
+                    float(y) - 8.0,
+                    str(i),
+                    color="white",
+                    fontsize=10,
+                    weight="bold",
+                    path_effects=[],
+                    bbox=dict(facecolor="black", alpha=0.55, edgecolor="none", pad=1.5),
+                )
+        if title in ("Depth difference image", "Depth PDF", "RGB PDF", "Merged PDF"):
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    if matplotlib.get_backend().lower() == "agg":
+        out_path = os.path.join("/tmp", "chip_pdf_debug.png")
+        fig.savefig(out_path, dpi=150)
+        print(f"[detect] Saved PDF debug visualization to {out_path}")
+        plt.close(fig)
+    else:
+        plt.show()
 
 
 def get_base_to_link6() -> tuple[np.ndarray, np.ndarray]:
@@ -2265,9 +2367,12 @@ def main(args=None):
             random_seed=detector_cfg.get("sample_random_seed", None),
         )
         if detector_cfg.get("show_pdf_overlay", True):
-            visualize_pdf_over_rgb(
+            visualize_pdf_debug(
                 current_rgb_bgr,
+                detector.last_depth_diff_mm,
                 chip_pdf,
+                detector.last_depth_pdf,
+                detector.last_rgb_pdf,
                 query_pixels,
                 alpha=float(detector_cfg.get("pdf_overlay_alpha", 0.55)),
             )
