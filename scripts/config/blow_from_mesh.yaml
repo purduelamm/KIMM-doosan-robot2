@@ -146,7 +146,7 @@ chip_detector:
   rgb_sift_contrast: 0.06
   rgb_sift_edge: 6
   rgb_n_components: 5
-  rgb_include_outliers: true
+  rgb_include_outliers: false
   rgb_outlier_radius: 15
   rgb_outlier_probability: 0.8
   rgb_pdf_downsample_factor: 1
@@ -155,8 +155,8 @@ chip_detector:
   rgb_only_outside_depth: true
   rgb_saliency_fallback_outside_depth: true
   require_valid_depth_for_pdf: false
-  sample_count: 5
-  sample_random_seed: 0
+  sample_count: 20
+  sample_random_seed: 1
   show_pdf_overlay: true
   pdf_overlay_alpha: 0.55
   mask_roi:
