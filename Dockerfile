@@ -72,7 +72,13 @@ RUN apt-get update && rosdep install --from-paths src --ignore-src -r -y \
 # 9. Build the workspace
 RUN /bin/bash -c "source /opt/ros/jazzy/setup.bash && colcon build"
 
-# 10. Set the entrypoint to automatically source ROS 2 and your workspace
+# 10. install required python modules
+RUN pip3 install trimesh --break-system-packages \
+    && pip3 install open3d --ignore-installed psutil --break-system-packages \
+    && pip3 install rtree --break-system-packages \
+    && pip3 install "numpy<2.0" --break-system-packages
+
+# 11. Set the entrypoint to automatically source ROS 2 and your workspace
 RUN echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc
 RUN echo "source /ros2_ws/install/setup.bash" >> ~/.bashrc
 CMD ["bash"]
