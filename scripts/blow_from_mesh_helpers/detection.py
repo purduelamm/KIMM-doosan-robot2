@@ -86,13 +86,25 @@ def get_detector_classes():
 def grab_image(img_topic) -> np.ndarray:
     """Subscribe, grab one frame, unsubscribe."""
     latest = {"img": None}
+    bridge = CvBridge()
 
-    def cb(msg):
+    def compressed_cb(msg):
         np_arr = np.frombuffer(msg.data, np.uint8)
         img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         latest["img"] = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    sub = node.create_subscription(CompressedImage, img_topic, cb, 10)
+    def raw_cb(msg):
+        img = bridge.imgmsg_to_cv2(msg, desired_encoding="rgb8")
+        latest["img"] = img
+
+    if img_topic.endswith("/compressed"):
+        msg_type = CompressedImage
+        callback = compressed_cb
+    else:
+        msg_type = Image
+        callback = raw_cb
+
+    sub = node.create_subscription(msg_type, img_topic, callback, 10)
     print("[img] Waiting for frame...")
     t0 = time.time()
     while latest["img"] is None:

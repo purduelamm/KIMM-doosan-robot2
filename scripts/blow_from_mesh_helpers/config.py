@@ -6,7 +6,11 @@ import yaml
 from scipy.spatial.transform import Rotation as R
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_CONFIG_PATH = os.path.join(SCRIPT_DIR, "config", "blow_from_mesh.yaml")
+CONFIG_DIR = os.path.join(SCRIPT_DIR, "config")
+CONFIG_PATH_BY_ROBOT = {
+    "doosan": os.path.join(CONFIG_DIR, "blow_from_mesh_doosan.yaml"),
+    "ur": os.path.join(CONFIG_DIR, "blow_from_mesh_ur.yaml"),
+}
 DETECTOR_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "KIMM_chipblowing_detection")
 DETECTOR_DIR_CANDIDATES = [
     CONFIGURED_DETECTOR_DIR
@@ -26,9 +30,57 @@ QUERY_PIXELS = [
 ]
 
 
-def load_config(path: str = DEFAULT_CONFIG_PATH) -> dict:
+def consume_cli_option(*names: str) -> str | None:
+    """Read and remove script-only args before rclpy parses sys.argv."""
+    index = 1
+    while index < len(sys.argv):
+        arg = sys.argv[index]
+        if arg == "--ros-args":
+            break
+        if arg in names:
+            if index + 1 >= len(sys.argv):
+                raise ValueError(f"{arg} requires a value.")
+            value = sys.argv[index + 1]
+            del sys.argv[index:index + 2]
+            return value
+        for name in names:
+            prefix = f"{name}="
+            if arg.startswith(prefix):
+                value = arg[len(prefix):]
+                del sys.argv[index]
+                return value
+        index += 1
+    return None
+
+
+def resolve_config_path() -> tuple[str, str | None]:
+    explicit_config = (
+        consume_cli_option("--config", "--config-file")
+        or os.environ.get("BLOW_FROM_MESH_CONFIG")
+    )
+    configured_robot = (
+        consume_cli_option("--robot", "--robot-type")
+        or os.environ.get("BLOW_FROM_MESH_ROBOT")
+    )
+
+    if explicit_config:
+        selected_robot = configured_robot.strip().lower() if configured_robot else None
+        return explicit_config, selected_robot
+
+    selected_robot = (configured_robot or "doosan").strip().lower()
+    if selected_robot not in CONFIG_PATH_BY_ROBOT:
+        raise ValueError(
+            f"Unsupported robot selection '{selected_robot}'. Use doosan or ur."
+        )
+    return CONFIG_PATH_BY_ROBOT[selected_robot], selected_robot
+
+
+CONFIG_PATH, SELECTED_ROBOT_TYPE = resolve_config_path()
+
+
+def load_config(path: str = CONFIG_PATH) -> dict:
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f) or {}
 
 
 def rotation_from_config(cfg: dict) -> R:
@@ -52,6 +104,12 @@ ROBOT_MODEL = CONFIG["robot"]["model"]
 ROBOT_TYPE = CONFIG["robot"].get("type", "doosan")
 if ROBOT_TYPE not in ("doosan", "ur"):
     raise ValueError(f"Unsupported robot.type '{ROBOT_TYPE}'. Use doosan or ur.")
+if SELECTED_ROBOT_TYPE and ROBOT_TYPE != SELECTED_ROBOT_TYPE:
+    raise ValueError(
+        f"Selected robot '{SELECTED_ROBOT_TYPE}' but loaded config "
+        f"robot.type is '{ROBOT_TYPE}' from {CONFIG_PATH}."
+    )
+print(f"[config] Loaded {ROBOT_TYPE} config: {CONFIG_PATH}")
 TRANSFORMS = CONFIG["transforms"]
 GAZ_TO_OPT_R = rotation_from_config(TRANSFORMS["gazebo_to_optical"])
 GAZ_TO_OPT_T = translation_from_config(TRANSFORMS["gazebo_to_optical"])

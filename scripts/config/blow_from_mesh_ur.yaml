@@ -1,0 +1,173 @@
+robot:
+  type: ur
+  id: ""
+  model: ur10e
+  node_name: coverage_path
+  frames:
+    tf_source: base_link
+    tf_target: tool0
+  reach_m: 1.3
+  initial_target:
+    type: joint_values
+    values: [-1.5708, -1.5708, -1.95477, 5.18363, 1.5708, 0.0]
+  detection_staging_target:
+    type: joint_values
+    values: [0.0, -1.5708, 0.0, -1.5708, 0.0, 0.0]
+
+motion_backend: moveit
+
+tool_control:
+  enabled: false
+  type: doosan_tool_digital_output
+
+camera:
+  image_topic: /camera/camera/color/image_raw
+  rgb_topic: /camera/camera/color/image_raw
+  depth_topic: ""
+  depth_unit: auto
+  intrinsics:
+    fx: 554.2562584220408
+    fy: 554.2562584220408
+    cx: 320.0
+    cy: 240.0
+
+transforms:
+  world_to_base:
+    euler_xyz: [0.0, 0.0, 0.0]
+    degrees: false
+    translation: [0.0, -0.897, 0.95]
+  link_to_camera:
+    euler_xyz: [0.0, -1.57079632679, 0.0]
+    degrees: false
+    translation: [0.0, 0.0, 0.08]
+  gazebo_to_optical:
+    matrix:
+      - [0.0, -1.0, 0.0]
+      - [0.0, 0.0, -1.0]
+      - [1.0, 0.0, 0.0]
+    translation: [0.0, 0.0, 0.0]
+
+mesh:
+  path: meshes/VMC-300-l.obj
+  dimension: 1000.0
+  world_to_cnc: [0.0, 0.0, 0.0]
+  normal_query_radius: 10.
+  velocity_scaling: 0.2
+  acceleration_scaling: 0.2
+  collision_object_id: cnc_mesh_obstacl0
+  normal_sample_count: 5000000
+  surface_offset_m: 0.2
+  pose_mode: fixed_blower_z_axis # mesh_normal | fixed_blower_z_axis
+  fixed_blower_z_axis:
+    angle_from_world_y_deg: 45.0
+    distance_m: 0.2
+
+path_actions:
+  cone_sweep:
+    enabled: true
+    angle_deg: 10.0
+    samples: 8
+
+moveit:
+  group: ur_manipulator
+  base_frame: base_link
+  # ee_link: link_6
+  # joint_names: [joint_1, joint_2, joint_3, joint_4, joint_5, joint_6]
+  # UR example:
+  ee_link: tool0
+  joint_names: [shoulder_pan_joint, shoulder_lift_joint, elbow_joint, wrist_1_joint, wrist_2_joint, wrist_3_joint]
+  joint_tolerance: 0.01
+  planning_service: plan_kinematic_path
+  move_action: move_action
+  scene_service: apply_planning_scene
+  scene_topic: planning_scene
+  execute_action: execute_trajectory
+  planning_time: 8.0
+  planning_attempts: 10
+  position_tolerance: 0.003
+  orientation_tolerance: 0.05
+  z_axis_only_orientation: true
+  free_z_axis_tolerance: 3.14159
+  yaw_optimization_deg: [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180]
+  velocity_scaling: 0.2
+  acceleration_scaling: 0.2
+  collision_object_id: cnc_mesh_obstacl
+  allow_cnc_collision_links: []
+  collision_margin_m: 0.1
+  disabled_self_collision_pairs:
+    - [base_link, link_1]
+    - [base_link, link_3]
+    - [link_1, link_2]
+    - [link_1, link_3]
+    - [link_1, link_5]
+    - [link_1, link_6]
+    - [link_2, link_3]
+    - [link_2, link_4]
+    - [link_2, link_5]
+    - [link_2, link_6]
+    - [link_3, link_4]
+    - [link_3, link_5]
+    - [link_3, link_6]
+    - [link_4, link_5]
+    - [link_4, link_6]
+    - [link_5, link_6]
+    - [blower_link, link_6]
+    # robot.type: ur automatically adds these common adjacent-link pairs:
+    # - [base_link_inertia, robot_base_guard]
+    # - [shoulder_link, upper_arm_link]
+    # - [upper_arm_link, forearm_link]
+    # - [forearm_link, wrist_1_link]
+    # - [wrist_1_link, wrist_2_link]
+    # - [wrist_2_link, wrist_3_link]
+
+visualization:
+  show_normals: true
+  show_trajectory: true
+  show_debug_scene: true
+  trajectory_axis_len: 0.2
+
+point_input:
+  use_interactive_picker_when_query_pixels_empty: true
+
+chip_detector:
+  enabled: false
+  frames_to_average: 30
+  frame_timeout_sec: 10.0
+  reference_timeout_sec: 15.0
+  current_timeout_sec: 15.0
+  min_valid_mm: 10.0
+  thresh_min_mm: 1.0
+  thresh_max_mm: 50.0
+  kmax: 5
+  random_state: 0
+  resample_cap: 1000
+  depth_fit_scale: 0.5
+  depth_pdf_downsample_factor: 1
+  rgb_fit_scale: 0.5
+  rgb_num_features: 500
+  rgb_sift_contrast: 0.06
+  rgb_sift_edge: 6
+  rgb_n_components: 5
+  rgb_include_outliers: false
+  rgb_outlier_radius: 15
+  rgb_outlier_probability: 0.8
+  rgb_pdf_downsample_factor: 1
+  depth_weight: 0.5
+  rgb_weight: 0.5
+  rgb_only_outside_depth: true
+  rgb_saliency_fallback_outside_depth: true
+  require_valid_depth_for_pdf: false
+  sample_count: 20
+  sample_random_seed: 1
+  show_pdf_overlay: true
+  pdf_overlay_alpha: 0.55
+  mask_roi:
+    x_min: 200
+    x_max: -1
+    y_min: 200
+    y_max: 550
+
+execution:
+  execute_gazebo_first: true
+  confirm_real_execution: true
+  online_segment_settle_sec: 0.2
