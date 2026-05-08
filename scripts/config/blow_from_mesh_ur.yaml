@@ -37,19 +37,19 @@ transforms:
     degrees: false
     translation: [0.0, -0.897, 0.95]
   link_to_camera:
-    euler_xyz: [0.0, -1.57079632679, 0.0]
+    euler_xyz: [0.0, -1.57079632679, 1.57079632679]
     degrees: false
     translation: [0.0, 0.0, 0.08]
   gazebo_to_optical:
     matrix:
+      - [0.0, 0.0, 1.0]
+      - [-1.0, 0.0, 0.0]
       - [0.0, -1.0, 0.0]
-      - [0.0, 0.0, -1.0]
-      - [1.0, 0.0, 0.0]
     translation: [0.0, 0.0, 0.0]
 
 mesh:
-  path: meshes/VMC-300-l.obj
-  dimension: 1000.0
+  path: meshes/SMEC_MVF5000_SN51.obj
+  dimension: 1.0
   world_to_cnc: [0.0, 0.0, 0.0]
   normal_query_radius: 10.
   velocity_scaling: 0.2
@@ -59,7 +59,7 @@ mesh:
   surface_offset_m: 0.2
   pose_mode: fixed_blower_z_axis # mesh_normal | fixed_blower_z_axis
   fixed_blower_z_axis:
-    angle_from_world_y_deg: 45.0
+    angle_from_world_y_deg: 90.0
     distance_m: 0.2
 
 path_actions:
