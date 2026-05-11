@@ -16,12 +16,12 @@ robot:
   box_cpp:
     initial_garget:
       type: joint_values
-      values: [-1.5708, -1.5708, -1.95477, 5.18363, 1.5708, 0.0]
+      values: [-1.3788, -2.1468, -1.7628, -0.7505, 1.5708, 0.1920] 
     up_configuration:
       type: joint_values
-      values: [0.0, -1.5708, 0.0, -1.5708, 0.0, 0.0]
-    box_width_m: 0.25
-    box_height_m: 0.17
+      values: [1.5708, -1.5708, 0.0, -1.5708, 0.0, 0.0]
+    box_width_m: 0.55
+    box_height_m: 0.40
     line_spacing_m: 0.01
     settle_sec: 1.0
 
