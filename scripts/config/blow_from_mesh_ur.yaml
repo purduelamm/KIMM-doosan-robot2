@@ -17,6 +17,9 @@ robot:
     initial_garget:
       type: joint_values
       values: [-1.5708, -1.5708, -1.95477, 5.18363, 1.5708, 0.0]
+    up_configuration:
+      type: joint_values
+      values: [0.0, -1.5708, 0.0, -1.5708, 0.0, 0.0]
     box_width_m: 0.25
     box_height_m: 0.17
     line_spacing_m: 0.01
@@ -101,7 +104,7 @@ moveit:
   acceleration_scaling: 0.2
   collision_object_id: cnc_mesh_obstacl
   allow_cnc_collision_links: []
-  collision_margin_m: 0.1
+  collision_margin_m: 0.2
   disabled_self_collision_pairs:
     - [base_link, link_1]
     - [base_link, link_3]

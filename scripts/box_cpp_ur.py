@@ -27,6 +27,8 @@ def get_box_config() -> dict:
         raise ValueError("robot.box_cpp is required in blow_from_mesh_ur.yaml.")
     if "initial_garget" not in box_cfg:
         raise ValueError("robot.box_cpp.initial_garget is required in blow_from_mesh_ur.yaml.")
+    if "up_configuration" not in box_cfg:
+        raise ValueError("robot.box_cpp.up_configuration is required in blow_from_mesh_ur.yaml.")
     for key in ("box_width_m", "box_height_m", "line_spacing_m"):
         if key not in box_cfg:
             raise ValueError(f"robot.box_cpp.{key} is required in blow_from_mesh_ur.yaml.")
@@ -117,9 +119,8 @@ def main(args=None):
 
     execute_waypoints(motion_backend, path)
 
-    print("Returning to center...")
-    plan = motion_backend.plan_to_pose(center_pose, start_state=None, segment_idx=len(path) + 1)
-    motion_backend.execute_plan(plan)
+    print("[finish] Moving to robot.box_cpp.up_configuration...")
+    motion_backend.move_to_joints(box_cfg["up_configuration"])
 
     print("Coverage path complete!")
     rclpy.shutdown()
