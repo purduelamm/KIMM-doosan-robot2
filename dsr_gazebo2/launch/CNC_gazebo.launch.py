@@ -19,7 +19,7 @@
 import os
 
 from launch import LaunchDescription
-from launch.actions import RegisterEventHandler,DeclareLaunchArgument, IncludeLaunchDescription, TimerAction, GroupAction
+from launch.actions import RegisterEventHandler,DeclareLaunchArgument, IncludeLaunchDescription, TimerAction, GroupAction, SetEnvironmentVariable
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.conditions import IfCondition, LaunchConfigurationEquals, UnlessCondition
 
@@ -45,6 +45,7 @@ ARGUMENTS =[
     DeclareLaunchArgument('Y',            default_value = '0',     description = 'Location Yaw on Gazebo'  ),
     DeclareLaunchArgument('use_sim_time', default_value ='false',  description = 'Use simulation time'     ),
     DeclareLaunchArgument('remap_tf',     default_value = 'false', description = 'REMAP TF'                ),
+    DeclareLaunchArgument('gz_ip',        default_value = '127.0.0.1', description = 'Gazebo Transport IP' ),
 ]
 
 def generate_launch_description():
@@ -58,11 +59,21 @@ def generate_launch_description():
         'empty_with_cam.sdf'       # The file name
     ])
 
-    gazebo = IncludeLaunchDescription(
+    # Start server and GUI explicitly.  The combined `gz sim <world>` launcher
+    # can fall into GUI-only mode while waiting indefinitely on
+    # /gazebo/starting_world, leaving ros_gz_sim/create without a world.
+    gazebo_server = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             [FindPackageShare("ros_gz_sim"), "/launch/gz_sim.launch.py"]
         ),
-        launch_arguments={"gz_args": ["-r -v 3 ", cam_sdf_path]}.items(),
+        launch_arguments={"gz_args": ["-s -r -v 3 ", cam_sdf_path]}.items(),
+    )
+
+    gazebo_gui = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            [FindPackageShare("ros_gz_sim"), "/launch/gz_sim.launch.py"]
+        ),
+        launch_arguments={"gz_args": "-g -v 3"}.items(),
     )
 
     # spawn robot arm
@@ -253,7 +264,12 @@ def generate_launch_description():
     )
 
     nodes = [
-        gazebo,
+        # Multicast discovery is commonly unavailable inside containers. Keep
+        # the server, GUI, and ros_gz clients on the local loopback interface.
+        SetEnvironmentVariable('GZ_IP', LaunchConfiguration('gz_ip')),
+        SetEnvironmentVariable('IGN_IP', LaunchConfiguration('gz_ip')),
+        gazebo_server,
+        gazebo_gui,
         original_tf_nodes,
         remapped_tf_nodes,
         gz_spawn_entity,

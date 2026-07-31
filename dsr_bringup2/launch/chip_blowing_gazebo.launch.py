@@ -287,9 +287,12 @@ def generate_launch_description():
     
     included_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(included_launch_file_path),
+        condition=IfCondition(LaunchConfiguration('gz')),
         launch_arguments={'use_gazebo': LaunchConfiguration('gz'), 
                           'name' : LaunchConfiguration('name'),
+                          'model' : LaunchConfiguration('model'),
                           'color' : LaunchConfiguration('color'),
+                          'gui' : 'false',
                           'x' :LaunchConfiguration('x'),
                           'y' :LaunchConfiguration('y'),
                           'z' :LaunchConfiguration('z'),
@@ -298,13 +301,6 @@ def generate_launch_description():
                           'Y' :LaunchConfiguration('Y'),
                           'use_sim_time' : LaunchConfiguration('use_sim_time'),
                           }.items(),
-    )
-
-    included_launch_after_robot_controller_spawner = RegisterEventHandler(
-        event_handler=OnProcessExit(
-            target_action=robot_controller_spawner,
-            on_exit=[included_launch],
-        )
     )
     #========= LAUNCH FILE THAT LOADS GAZEBO ELEMENTS ==========# 
 
@@ -335,9 +331,9 @@ def generate_launch_description():
         move_group_node,
         original_tf_nodes,
         remapped_tf_nodes,
+        included_launch,
         robot_controller_spawner,
         joint_state_broadcaster_spawner,
-        included_launch_after_robot_controller_spawner,
         delay_moveit_controller_after_robot_controller_spawner,
         delay_control_node_after_connection_node,
     ]
