@@ -9,7 +9,8 @@ robot:
   reach_m: 0.9
   initial_target:
     type: doosan_posx
-    values: [-108.639, 452.699, 501.480, 104.69, 142.73, 1.77]
+    # values: [-108.639, 452.699, 501.480, 104.69, 142.73, 1.77]
+    values: [-6.200, -539.021, 500.460, -90.0, 180.0, 0.0]
   detection_staging_target:
     type: joint_values
     values: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
