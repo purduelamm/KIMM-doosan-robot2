@@ -16,6 +16,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', files('launch/*')),
+        ('share/' + package_name + '/meshes', files('../scripts/meshes/Vice.obj')),
         ('share/' + package_name + '/rviz', files('rviz/*')),
     ],
     install_requires=['setuptools'],

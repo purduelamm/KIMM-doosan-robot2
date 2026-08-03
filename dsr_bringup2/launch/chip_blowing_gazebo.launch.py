@@ -41,6 +41,10 @@ from dsr_bringup2.utils import read_update_rate, show_git_info
 EE_BOX_SIZE = (0.50, 0.50, 0.80)
 ARUCO_MARKER_SIZE = 0.115
 ARUCO_MARKER_THICKNESS = 0.001
+VICE_MESH_SCALE = 0.001
+# Vice.obj bounds in its native millimetre coordinates. Offset the scaled mesh
+# so its XY bounding-box center and lowest Z point coincide with the model origin.
+VICE_MESH_LOCAL_OFFSET = (-1.591830368, -0.005995712, -0.432000008)
 # m0609 link_6 position in base coordinates at
 # joints [90, -30, -35, 0, -115, 180] degrees.
 EE_POSITION_IN_BASE = (-0.0062, -0.539021265629, 0.490459961276)
@@ -115,6 +119,65 @@ def spawn_box_below_end_effector(context):
                 '-x', str(box_center[0]),
                 '-y', str(box_center[1]),
                 '-z', str(box_center[2]),
+            ],
+            condition=IfCondition(LaunchConfiguration('gz')),
+        )
+    ]
+
+
+def spawn_vice_on_box(context):
+    """Spawn Vice.obj statically at the center of the box's top surface."""
+    box_x, box_y, _ = get_target_ee_world_position(context)
+    vice_mesh_path = os.path.join(
+        get_package_share_directory('dsr_bringup2'),
+        'meshes',
+        'Vice.obj',
+    )
+    offset = VICE_MESH_LOCAL_OFFSET
+    vice_sdf = f'''<?xml version="1.0"?>
+<sdf version="1.8">
+  <model name="box_vice">
+    <static>true</static>
+    <link name="vice_link">
+      <collision name="vice_collision">
+        <pose>{offset[0]} {offset[1]} {offset[2]} 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>file://{vice_mesh_path}</uri>
+            <scale>{VICE_MESH_SCALE} {VICE_MESH_SCALE} {VICE_MESH_SCALE}</scale>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name="vice_visual">
+        <pose>{offset[0]} {offset[1]} {offset[2]} 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>file://{vice_mesh_path}</uri>
+            <scale>{VICE_MESH_SCALE} {VICE_MESH_SCALE} {VICE_MESH_SCALE}</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.32 0.32 0.34 1.0</ambient>
+          <diffuse>0.48 0.48 0.52 1.0</diffuse>
+          <specular>0.20 0.20 0.20 1.0</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>'''
+
+    return [
+        Node(
+            package='ros_gz_sim',
+            executable='create',
+            output='screen',
+            arguments=[
+                '-string', vice_sdf,
+                '-name', 'box_vice',
+                '-allow_renaming', 'false',
+                '-x', str(box_x),
+                '-y', str(box_y),
+                '-z', str(EE_BOX_SIZE[2]),
             ],
             condition=IfCondition(LaunchConfiguration('gz')),
         )
@@ -489,6 +552,7 @@ def generate_launch_description():
         remapped_tf_nodes,
         included_launch,
         OpaqueFunction(function=spawn_box_below_end_effector),
+        OpaqueFunction(function=spawn_vice_on_box),
         OpaqueFunction(function=spawn_aruco_markers),
         robot_controller_spawner,
         joint_state_broadcaster_spawner,
