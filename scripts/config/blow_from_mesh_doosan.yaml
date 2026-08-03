@@ -20,16 +20,29 @@ tool_control:
   enabled: true
   type: doosan_tool_digital_output
 
+# real
+# camera:
+#   image_topic: /camera/camera/color/image_raw/compressed
+#   rgb_topic: /camera/camera/color/image_raw
+#   depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+#   depth_unit: auto
+#   intrinsics:
+#     fx: 611.9779052734375
+#     fy: 611.1830444335938
+#     cx: 315.73968505859375
+#     cy: 232.30418395996094
+
+# gazebo
 camera:
-  image_topic: /camera/camera/color/image_raw/compressed
-  rgb_topic: /camera/camera/color/image_raw
+  image_topic: /camera/image_raw/compressed
+  rgb_topic: /camera/image_raw
   depth_topic: /camera/camera/aligned_depth_to_color/image_raw
   depth_unit: auto
   intrinsics:
-    fx: 611.9779052734375
-    fy: 611.1830444335938
-    cx: 315.73968505859375
-    cy: 232.30418395996094
+    fx: 762.7223
+    fy: 762.7223
+    cx: 640.0
+    cy: 320.0
 
 transforms:
   world_to_base:
@@ -37,13 +50,22 @@ transforms:
     degrees: false
     translation: [-0.61, 0.365, 0.91]
   link_to_camera:
-    quaternion_xyzw: [0.0069, -0.6980, 0.7160, -0.0045]
-    translation: [-0.0336, 0.0378, 0.1082]
+    # real
+    # quaternion_xyzw: [0.0069, -0.6980, 0.7160, -0.0045]
+    # translation: [-0.0336, 0.0378, 0.1082]
+    # gazebo
+    quaternion_xyzw: [0, 0, 0.0, 1.0 ]
+    translation: [0.05, 0.0, 0.01]
   gazebo_to_optical:
     matrix:
+      # real
+      # - [0.0, -1.0, 0.0]
+      # - [0.0, 0.0, -1.0]
+      # - [1.0, 0.0, 0.0]
+      # gazebo
       - [0.0, -1.0, 0.0]
-      - [0.0, 0.0, -1.0]
       - [1.0, 0.0, 0.0]
+      - [0.0, 0.0, 1.0]
     translation: [0.0, 0.0, 0.0]
 
 mesh:
