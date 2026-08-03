@@ -1,9 +1,8 @@
 <?xml version="1.0" ?>
 <sdf version="1.6">
-
-  <model name="markerbox1">
-    <link name="box1">
-      <pose>0 0 0 0 0 0</pose> 
+  <model name="markerbox4">
+    <link name="box4">
+      <pose>0 0 0 0 0 0</pose>
       <inertial>
         <inertia>
           <ixx>1</ixx>
@@ -15,37 +14,35 @@
         </inertia>
         <mass>1.0</mass>
       </inertial>
-      <collision name="box1_collision">
+      <collision name="box4_collision">
         <geometry>
           <box>
             <size>0.115 0.115 0.001</size>
           </box>
         </geometry>
       </collision>
-      <visual name="box1_visual">
+      <visual name="box4_visual">
         <geometry>
           <box>
             <size>0.115 0.115 0.001</size>
           </box>
         </geometry>
         <material>
-          <ambient>0.1 0.0 0.0 1</ambient>
-          <diffuse>0.6 0.0 0.0 1</diffuse>
-          <specular>0.8 0.6 0.6 1</specular>
+          <ambient>0.1 0.1 0.0 1</ambient>
+          <diffuse>0.6 0.6 0.0 1</diffuse>
+          <specular>0.8 0.8 0.6 1</specular>
         </material>
-
       </visual>
     </link>
 
-    <joint name="joint_plane1" type="fixed">
-      <parent>box1</parent>
-      <child>plane1</child>
+    <joint name="joint_plane4" type="fixed">
+      <parent>box4</parent>
+      <child>plane4</child>
     </joint>
 
-
-    <link name="plane1">
+    <link name="plane4">
       <pose>0 0 0.0005 0 0 0</pose>
-      <visual name="plane1_visual">
+      <visual name="plane4_visual">
         <geometry>
           <plane>
             <normal>0 0 1</normal>
@@ -60,19 +57,17 @@
       </visual>
     </link>
 
-
-    <joint name="joint_markerbox1" type="fixed">
-      <parent>plane1</parent>
-      <child>marker1</child>
+    <joint name="joint_markerbox4" type="fixed">
+      <parent>plane4</parent>
+      <child>marker4</child>
     </joint>
 
-
-    <link name="marker1">
+    <link name="marker4">
       <pose>0 0 0.0006 0 0 0</pose>
-      <visual name="marker1_visual">
+      <visual name="marker4_visual">
         <geometry>
           <box>
-            <size>0.115 0.115 0.0001</size>  
+            <size>0.115 0.115 0.0001</size>
           </box>
         </geometry>
         <material>
@@ -81,23 +76,20 @@
           <specular>0.0 0.0 0.0 1</specular>
           <pbr>
             <metal>
-              <albedo_map>textures/4x4_1000-1_115.png</albedo_map>
+              <albedo_map>textures/4x4_1000-4_115.png</albedo_map>
               <roughness>1.0</roughness>
               <metalness>0.0</metalness>
             </metal>
           </pbr>
         </material>
-
       </visual>
-
-      <collision name="collision1">
+      <collision name="collision4">
         <geometry>
           <box>
-            <size>0.115 0.115 0.0001</size>  
+            <size>0.115 0.115 0.0001</size>
           </box>
         </geometry>
       </collision>
     </link>
   </model>
-
 </sdf>

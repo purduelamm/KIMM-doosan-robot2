@@ -36,6 +36,53 @@ from launch.launch_context import LaunchContext
 from moveit_configs_utils import MoveItConfigsBuilder
 from dsr_bringup2.utils import read_update_rate, show_git_info
 
+
+def spawn_aruco_markers(context):
+    """Create one Gazebo spawn action for each configured ArUco marker."""
+    marker_specs = LaunchConfiguration('aruco_markers').perform(context).strip()
+    if not marker_specs:
+        return []
+
+    marker_model_dir = os.path.join(
+        get_package_share_directory('dsr_visualservoing'),
+        'description',
+    )
+    spawn_actions = []
+
+    for index, marker_spec in enumerate(marker_specs.split(';'), start=1):
+        fields = [field.strip() for field in marker_spec.split(',')]
+        if len(fields) != 7:
+            raise RuntimeError(
+                "Each aruco_markers entry must be 'id,x,y,z,roll,pitch,yaw'; "
+                f"received: {marker_spec!r}"
+            )
+
+        marker_id, x, y, z, roll, pitch, yaw = fields
+        if marker_id not in {'1', '2', '3', '4'}:
+            raise RuntimeError(
+                f"Unsupported ArUco marker ID {marker_id!r}; available models are 1, 2, 3, and 4"
+            )
+
+        spawn_actions.append(
+            Node(
+                package='ros_gz_sim',
+                executable='create',
+                output='screen',
+                arguments=[
+                    '-file', os.path.join(marker_model_dir, f'markerbox{marker_id}.sdf'),
+                    '-name', f'aruco_marker_{marker_id}_{index}',
+                    '-x', x,
+                    '-y', y,
+                    '-z', z,
+                    '-R', roll,
+                    '-P', pitch,
+                    '-Y', yaw,
+                ],
+            )
+        )
+
+    return spawn_actions
+
 def print_launch_configuration_value(context, *args, **kwargs):
     gz_value = LaunchConfiguration('gz').perform(context)
     print(f'LaunchConfiguration gz: {gz_value}')
@@ -106,6 +153,19 @@ def generate_launch_description():
         DeclareLaunchArgument('gripper',      default_value = 'none',           description = 'GRIPPER'                 ),
         DeclareLaunchArgument('use_sim_time', default_value='false',            description='Use simulation time'       ),
         DeclareLaunchArgument('remap_tf',     default_value = 'false',          description = 'REMAP TF'                ),
+        DeclareLaunchArgument(
+            'aruco_markers',
+            default_value=(
+                '1,1.0,0.0,0.25,0,0,0;'
+                '2,0.7,0.5,0.25,0,0,0;'
+                '3,0.7,-0.5,0.25,0,0,0;'
+                '4,0.4,0.0,0.25,0,0,0'
+            ),
+            description=(
+                "Semicolon-separated ArUco markers in "
+                "'id,x,y,z,roll,pitch,yaw' format. Use an empty value to disable them."
+            ),
+        ),
     ]
     
     set_use_sim_time = SetLaunchConfiguration(name='use_sim_time', value='false')
@@ -332,6 +392,7 @@ def generate_launch_description():
         original_tf_nodes,
         remapped_tf_nodes,
         included_launch,
+        OpaqueFunction(function=spawn_aruco_markers),
         robot_controller_spawner,
         joint_state_broadcaster_spawner,
         delay_moveit_controller_after_robot_controller_spawner,
