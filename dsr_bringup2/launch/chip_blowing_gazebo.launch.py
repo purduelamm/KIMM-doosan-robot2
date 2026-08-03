@@ -16,6 +16,7 @@
 #  limitations under the License.
 # 
 
+import math
 import os
 
 from launch import LaunchDescription
@@ -37,11 +38,116 @@ from moveit_configs_utils import MoveItConfigsBuilder
 from dsr_bringup2.utils import read_update_rate, show_git_info
 
 
+EE_BOX_SIZE = (0.50, 0.50, 0.80)
+ARUCO_MARKER_SIZE = 0.115
+ARUCO_MARKER_THICKNESS = 0.001
+# m0609 link_6 position in base coordinates at
+# joints [90, -30, -35, 0, -115, 180] degrees.
+EE_POSITION_IN_BASE = (-0.0062, -0.539021265629, 0.490459961276)
+EE_BOX_SDF = f'''<?xml version="1.0"?>
+<sdf version="1.8">
+  <model name="ee_support_box">
+    <static>true</static>
+    <link name="box_link">
+      <collision name="box_collision">
+        <geometry>
+          <box><size>{EE_BOX_SIZE[0]} {EE_BOX_SIZE[1]} {EE_BOX_SIZE[2]}</size></box>
+        </geometry>
+      </collision>
+      <visual name="box_visual">
+        <geometry>
+          <box><size>{EE_BOX_SIZE[0]} {EE_BOX_SIZE[1]} {EE_BOX_SIZE[2]}</size></box>
+        </geometry>
+        <material>
+          <ambient>0.18 0.32 0.50 1.0</ambient>
+          <diffuse>0.25 0.45 0.70 1.0</diffuse>
+          <specular>0.10 0.10 0.10 1.0</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>'''
+
+
+def get_target_ee_world_position(context):
+    """Return the target m0609 flange position in Gazebo world coordinates."""
+    robot_position = [
+        float(LaunchConfiguration(axis).perform(context)) for axis in ('x', 'y', 'z')
+    ]
+    roll, pitch, yaw = [
+        float(LaunchConfiguration(axis).perform(context)) for axis in ('R', 'P', 'Y')
+    ]
+
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    robot_rotation = (
+        (cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr),
+        (sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr),
+        (-sp, cp * sr, cp * cr),
+    )
+    return [
+        robot_position[row]
+        + sum(robot_rotation[row][column] * EE_POSITION_IN_BASE[column]
+              for column in range(3))
+        for row in range(3)
+    ]
+
+
+def spawn_box_below_end_effector(context):
+    """Spawn a grounded 50x50x80 cm box below the target flange in XY."""
+    ee_world = get_target_ee_world_position(context)
+    box_center = (
+        ee_world[0],
+        ee_world[1],
+        EE_BOX_SIZE[2] / 2.0,
+    )
+
+    return [
+        Node(
+            package='ros_gz_sim',
+            executable='create',
+            output='screen',
+            arguments=[
+                '-string', EE_BOX_SDF,
+                '-name', 'ee_support_box',
+                '-allow_renaming', 'false',
+                '-x', str(box_center[0]),
+                '-y', str(box_center[1]),
+                '-z', str(box_center[2]),
+            ],
+            condition=IfCondition(LaunchConfiguration('gz')),
+        )
+    ]
+
+
 def spawn_aruco_markers(context):
     """Create one Gazebo spawn action for each configured ArUco marker."""
     marker_specs = LaunchConfiguration('aruco_markers').perform(context).strip()
     if not marker_specs:
         return []
+
+    if marker_specs.lower() == 'box_corners':
+        box_x, box_y, _ = get_target_ee_world_position(context)
+        marker_offset = (EE_BOX_SIZE[0] - ARUCO_MARKER_SIZE) / 2.0
+        marker_z = EE_BOX_SIZE[2] + ARUCO_MARKER_THICKNESS / 2.0
+        # IDs 4->1 and 3->2 form orthogonal diagonals, matching the pose estimator.
+        parsed_marker_specs = [
+            ('1', box_x + marker_offset, box_y + marker_offset, marker_z, 0, 0, 0),
+            ('2', box_x - marker_offset, box_y + marker_offset, marker_z, 0, 0, 0),
+            ('3', box_x + marker_offset, box_y - marker_offset, marker_z, 0, 0, 0),
+            ('4', box_x - marker_offset, box_y - marker_offset, marker_z, 0, 0, 0),
+        ]
+    else:
+        parsed_marker_specs = []
+        for marker_spec in marker_specs.split(';'):
+            fields = [field.strip() for field in marker_spec.split(',')]
+            if len(fields) != 7:
+                raise RuntimeError(
+                    "Each aruco_markers entry must be 'id,x,y,z,roll,pitch,yaw'; "
+                    f"received: {marker_spec!r}"
+                )
+            parsed_marker_specs.append(fields)
 
     marker_model_dir = os.path.join(
         get_package_share_directory('dsr_visualservoing'),
@@ -49,14 +155,7 @@ def spawn_aruco_markers(context):
     )
     spawn_actions = []
 
-    for index, marker_spec in enumerate(marker_specs.split(';'), start=1):
-        fields = [field.strip() for field in marker_spec.split(',')]
-        if len(fields) != 7:
-            raise RuntimeError(
-                "Each aruco_markers entry must be 'id,x,y,z,roll,pitch,yaw'; "
-                f"received: {marker_spec!r}"
-            )
-
+    for index, fields in enumerate(parsed_marker_specs, start=1):
         marker_id, x, y, z, roll, pitch, yaw = fields
         if marker_id not in {'1', '2', '3', '4'}:
             raise RuntimeError(
@@ -71,13 +170,14 @@ def spawn_aruco_markers(context):
                 arguments=[
                     '-file', os.path.join(marker_model_dir, f'markerbox{marker_id}.sdf'),
                     '-name', f'aruco_marker_{marker_id}_{index}',
-                    '-x', x,
-                    '-y', y,
-                    '-z', z,
-                    '-R', roll,
-                    '-P', pitch,
-                    '-Y', yaw,
+                    '-x', str(x),
+                    '-y', str(y),
+                    '-z', str(z),
+                    '-R', str(roll),
+                    '-P', str(pitch),
+                    '-Y', str(yaw),
                 ],
+                condition=IfCondition(LaunchConfiguration('gz')),
             )
         )
 
@@ -155,15 +255,11 @@ def generate_launch_description():
         DeclareLaunchArgument('remap_tf',     default_value = 'false',          description = 'REMAP TF'                ),
         DeclareLaunchArgument(
             'aruco_markers',
-            default_value=(
-                '1,1.0,0.0,0.25,0,0,0;'
-                '2,0.7,0.5,0.25,0,0,0;'
-                '3,0.7,-0.5,0.25,0,0,0;'
-                '4,0.4,0.0,0.25,0,0,0'
-            ),
+            default_value='box_corners',
             description=(
-                "Semicolon-separated ArUco markers in "
-                "'id,x,y,z,roll,pitch,yaw' format. Use an empty value to disable them."
+                "Use 'box_corners' to place IDs 1-4 on the box corners, or provide "
+                "semicolon-separated entries in 'id,x,y,z,roll,pitch,yaw' format. "
+                "Use an empty value to disable them."
             ),
         ),
     ]
@@ -392,6 +488,7 @@ def generate_launch_description():
         original_tf_nodes,
         remapped_tf_nodes,
         included_launch,
+        OpaqueFunction(function=spawn_box_below_end_effector),
         OpaqueFunction(function=spawn_aruco_markers),
         robot_controller_spawner,
         joint_state_broadcaster_spawner,
