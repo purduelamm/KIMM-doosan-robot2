@@ -118,6 +118,13 @@ WLD_TO_BASE_T = translation_from_config(TRANSFORMS["world_to_base"])
 L6_TO_CAM_R = rotation_from_config(TRANSFORMS["link_to_camera"])
 L6_TO_CAM_T = translation_from_config(TRANSFORMS["link_to_camera"])
 WLD_TO_CNC = np.array(CONFIG["mesh"].get("world_to_cnc", [0.0, 0.0, 0.0]), dtype=float)
+CNC_MESH_LOCAL_OFFSET = np.array(
+    CONFIG["mesh"].get("mesh_local_offset_m", [0.0, 0.0, 0.0]), dtype=float
+)
+if WLD_TO_CNC.shape != (3,):
+    raise ValueError("mesh.world_to_cnc must contain exactly three translation values.")
+if CNC_MESH_LOCAL_OFFSET.shape != (3,):
+    raise ValueError("mesh.mesh_local_offset_m must contain exactly three values.")
 
 MESH_DIMENSION = float(CONFIG["mesh"]["dimension"])
 CAMERA_CFG = CONFIG["camera"]

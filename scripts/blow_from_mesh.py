@@ -8,14 +8,17 @@ import trimesh
 from blow_from_mesh_helpers import ros_context
 from blow_from_mesh_helpers.config import (
     CAMERA_CFG,
+    CNC_MESH_LOCAL_OFFSET,
     CNC_mesh_path,
     CONFIG,
     DETECTION_STAGING_TARGET,
     IMG_TOPIC,
     INIT_TARGET,
     QUERY_PIXELS,
+    MESH_DIMENSION,
     WLD_TO_BASE_R,
     WLD_TO_BASE_T,
+    WLD_TO_CNC,
 )
 from blow_from_mesh_helpers.detection import (
     RGBDChipDetector,
@@ -48,6 +51,17 @@ def main(args=None):
     ros_context.init_ros()
 
     CNC_mesh = trimesh.load_mesh(CNC_mesh_path)
+    # Mesh vertices use mesh units (millimetres for the Doosan configuration).
+    # Place the geometry in the global/world coordinate system once here so
+    # visualization, ray casting, normal queries, and MoveIt collision geometry
+    # all consume the same transformed mesh.
+    mesh_translation_world = WLD_TO_CNC + CNC_MESH_LOCAL_OFFSET
+    CNC_mesh.apply_translation(mesh_translation_world * MESH_DIMENSION)
+
+    T_w_cnc = make_SE3(trimesh.transformations.identity_matrix()[:3, :3], WLD_TO_CNC)
+    print("[mesh] T_world_cnc from YAML:\n", T_w_cnc)
+    if any(abs(value) > 0.0 for value in CNC_MESH_LOCAL_OFFSET):
+        print("[mesh] OBJ local offset [m]:", CNC_MESH_LOCAL_OFFSET)
     T_w_b = make_SE3(WLD_TO_BASE_R.as_matrix(), WLD_TO_BASE_T)
     motion_backend = create_motion_backend()
     detector_cfg = CONFIG.get("chip_detector", {})
@@ -117,6 +131,7 @@ def main(args=None):
                 CNC_mesh,
                 T_w_b,
                 T_w_cm,
+                T_w_cnc,
                 axis_len=float(
                     CONFIG.get("visualization", {}).get("trajectory_axis_len", 0.2)
                 ),

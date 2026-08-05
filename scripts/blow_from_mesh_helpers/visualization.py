@@ -342,6 +342,7 @@ def visualize_debug_scene(
     cnc_mesh: trimesh.Trimesh,
     T_w_b: np.ndarray,
     T_w_cm: np.ndarray,
+    T_w_cnc: np.ndarray,
     axis_len: float = 0.2,
 ) -> None:
     import open3d as o3d
@@ -356,6 +357,12 @@ def visualize_debug_scene(
         size=axis_len, origin=[0.0, 0.0, 0.0]
     )
     geometries.append(world_frame)
+
+    cnc_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+        size=axis_len * 0.6, origin=T_w_cnc[:3, 3]
+    )
+    cnc_frame.rotate(T_w_cnc[:3, :3], center=T_w_cnc[:3, 3])
+    geometries.append(cnc_frame)
 
     camera_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
         size=axis_len * 0.6, origin=T_w_cm[:3, 3]
@@ -402,7 +409,7 @@ def visualize_debug_scene(
         geometries.append(robot_skeleton)
 
     print(
-        "[debug-vis] Showing world frame, camera frame, "
+        "[debug-vis] Showing world frame, CNC frame, camera frame, "
         f"{mesh_count} robot visual mesh(es), current robot link frames, and CNC mesh."
     )
     o3d.visualization.draw_geometries(

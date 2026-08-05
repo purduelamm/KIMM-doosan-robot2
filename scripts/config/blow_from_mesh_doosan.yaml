@@ -70,9 +70,13 @@ transforms:
     translation: [0.0, 0.0, 0.0]
 
 mesh:
-  path: meshes/VMC-300-l.obj
+  path: meshes/Vice.obj
   dimension: 1000.0
-  world_to_cnc: [0.0, 0.0, 0.0]
+  world_to_cnc: [-0.60376, 0.904021, 0.8]
+  # Offset from Vice.obj's native origin to its bottom-center CNC frame, in metres.
+  # This matches VICE_MESH_LOCAL_OFFSET in chip_blowing_gazebo.launch.py.
+  mesh_local_offset_m: [-1.591830368, -0.005995712, -0.432000008]
+  # world_to_cnc: [-10.0, 0.0, 0.8]
   normal_query_radius: 10.0
   velocity_scaling: 0.2
   acceleration_scaling: 0.2
@@ -142,7 +146,7 @@ point_input:
   use_interactive_picker_when_query_pixels_empty: true
 
 chip_detector:
-  enabled: true
+  enabled: false
   frames_to_average: 30
   frame_timeout_sec: 10.0
   reference_timeout_sec: 15.0
