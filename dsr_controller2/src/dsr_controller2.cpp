@@ -1921,7 +1921,7 @@ auto connect_rt_control_cb = [this](const std::shared_ptr<dsr_msgs2::srv::Connec
 auto disconnect_rt_control_cb = [this](const std::shared_ptr<dsr_msgs2::srv::DisconnectRtControl::Request> /*req*/, 
                                        std::shared_ptr<dsr_msgs2::srv::DisconnectRtControl::Response> res) -> void 
 {
-    res->success = Drfl->disconnect_rt_control();
+    // res->success = Drfl->disconnect_rt_control();
 };
 
 auto get_rt_control_output_version_list_cb = [this](const std::shared_ptr<dsr_msgs2::srv::GetRtControlOutputVersionList::Request> /*req*/, 
