@@ -157,7 +157,7 @@ def visualize_camera_image(
     rgb_image: np.ndarray,
     duration_ms: int,
 ) -> bool:
-    """Show a captured RGB image in an OpenCV window when a display is available."""
+    """Show the annotated RGB pose result when a display is available."""
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         node.get_logger().warning(
             "Camera visualization requested, but no graphical display is available."
@@ -166,7 +166,7 @@ def visualize_camera_image(
     if duration_ms < 0:
         raise ValueError("visualization_duration_ms must be zero or greater.")
 
-    window_name = "ArUco box pose - captured camera image"
+    window_name = "ArUco box pose - estimated coordinate frames"
     bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
     window_created = False
     try:
@@ -175,12 +175,14 @@ def visualize_camera_image(
         cv2.imshow(window_name, bgr_image)
         if duration_ms == 0:
             node.get_logger().info(
-                "Showing captured camera image; press any key in the image window to continue."
+                "Showing estimated marker and box frames; "
+                "press any key in the image window to continue."
             )
             cv2.waitKey(0)
         else:
             node.get_logger().info(
-                f"Showing captured camera image for {duration_ms / 1000.0:.1f}s."
+                "Showing estimated marker and box frames for "
+                f"{duration_ms / 1000.0:.1f}s."
             )
             cv2.waitKey(duration_ms)
     except cv2.error as exc:
@@ -252,12 +254,12 @@ def create_aruco_detector():
     return detect
 
 
-def detect_marker_centers(
+def detect_marker_poses(
     rgb_image: np.ndarray,
     marker_size: float,
     camera_matrix: np.ndarray,
-) -> dict[int, np.ndarray]:
-    """Detect IDs 1-4 and return their centers in optical-camera coordinates."""
+) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
+    """Detect IDs 1-4 and return camera poses and image corners by marker ID."""
     if marker_size <= 0.0:
         raise ValueError("marker_size must be greater than zero.")
     if not hasattr(cv2, "aruco"):
@@ -294,22 +296,129 @@ def detect_marker_centers(
         corners[required_indices[marker_id]] for marker_id in EXPECTED_MARKER_IDS
     ]
     distortion = np.zeros(5, dtype=float)
-    _, translations, _ = cv2.aruco.estimatePoseSingleMarkers(
+    rotation_vectors, translations, _ = cv2.aruco.estimatePoseSingleMarkers(
         selected_corners,
         marker_size,
         np.asarray(camera_matrix, dtype=float),
         distortion,
     )
-    if translations is None or len(translations) != len(EXPECTED_MARKER_IDS):
-        raise RuntimeError("OpenCV failed to estimate all required marker positions.")
+    if (
+        rotation_vectors is None
+        or translations is None
+        or len(rotation_vectors) != len(EXPECTED_MARKER_IDS)
+        or len(translations) != len(EXPECTED_MARKER_IDS)
+    ):
+        raise RuntimeError("OpenCV failed to estimate all required marker poses.")
 
-    marker_centers = {
-        marker_id: np.asarray(translations[index], dtype=float).reshape(3)
-        for index, marker_id in enumerate(EXPECTED_MARKER_IDS)
+    marker_poses = {}
+    marker_corners = {}
+    for index, marker_id in enumerate(EXPECTED_MARKER_IDS):
+        rotation_vector = np.asarray(rotation_vectors[index], dtype=float).reshape(3)
+        translation = np.asarray(translations[index], dtype=float).reshape(3)
+        if not (
+            np.all(np.isfinite(rotation_vector))
+            and np.all(np.isfinite(translation))
+        ):
+            raise RuntimeError("Estimated marker poses contain non-finite values.")
+        rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
+        marker_poses[marker_id] = make_transform(rotation_matrix, translation)
+        marker_corners[marker_id] = np.asarray(
+            selected_corners[index], dtype=np.float32
+        ).copy()
+
+    return marker_poses, marker_corners
+
+
+def detect_marker_centers(
+    rgb_image: np.ndarray,
+    marker_size: float,
+    camera_matrix: np.ndarray,
+) -> dict[int, np.ndarray]:
+    """Detect IDs 1-4 and return their centers in optical-camera coordinates."""
+    marker_poses, _ = detect_marker_poses(rgb_image, marker_size, camera_matrix)
+    return {
+        marker_id: transform[:3, 3].copy()
+        for marker_id, transform in marker_poses.items()
     }
-    if not all(np.all(np.isfinite(center)) for center in marker_centers.values()):
-        raise RuntimeError("Estimated marker positions contain non-finite values.")
-    return marker_centers
+
+
+def draw_pose_overlay(
+    rgb_image: np.ndarray,
+    marker_poses: Mapping[int, np.ndarray],
+    marker_corners: Mapping[int, np.ndarray],
+    camera_to_box: np.ndarray,
+    camera_matrix: np.ndarray,
+    marker_size: float,
+) -> np.ndarray:
+    """Return an RGB image annotated with marker and derived box frames."""
+    if marker_size <= 0.0:
+        raise ValueError("marker_size must be greater than zero.")
+    missing_poses = sorted(set(EXPECTED_MARKER_IDS) - set(marker_poses))
+    missing_corners = sorted(set(EXPECTED_MARKER_IDS) - set(marker_corners))
+    if missing_poses or missing_corners:
+        raise ValueError(
+            "Pose overlay requires marker poses and corners for IDs 1-4; "
+            f"missing poses: {missing_poses}, missing corners: {missing_corners}."
+        )
+
+    camera_matrix = np.asarray(camera_matrix, dtype=float)
+    camera_to_box = np.asarray(camera_to_box, dtype=float)
+    if camera_matrix.shape != (3, 3):
+        raise ValueError("camera_matrix must be 3x3.")
+    if camera_to_box.shape != (4, 4):
+        raise ValueError("camera_to_box must be 4x4.")
+
+    distortion = np.zeros(5, dtype=float)
+    bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
+    ordered_corners = [marker_corners[marker_id] for marker_id in EXPECTED_MARKER_IDS]
+    marker_ids = np.asarray(EXPECTED_MARKER_IDS, dtype=np.int32).reshape(-1, 1)
+    cv2.aruco.drawDetectedMarkers(bgr_image, ordered_corners, marker_ids)
+
+    for marker_id in EXPECTED_MARKER_IDS:
+        camera_to_marker = np.asarray(marker_poses[marker_id], dtype=float)
+        if camera_to_marker.shape != (4, 4):
+            raise ValueError(f"Marker {marker_id} pose must be 4x4.")
+        rotation_vector, _ = cv2.Rodrigues(camera_to_marker[:3, :3])
+        cv2.drawFrameAxes(
+            bgr_image,
+            camera_matrix,
+            distortion,
+            rotation_vector,
+            camera_to_marker[:3, 3],
+            marker_size / 2.0,
+            2,
+        )
+
+    box_rotation_vector, _ = cv2.Rodrigues(camera_to_box[:3, :3])
+    box_translation = camera_to_box[:3, 3]
+    cv2.drawFrameAxes(
+        bgr_image,
+        camera_matrix,
+        distortion,
+        box_rotation_vector,
+        box_translation,
+        marker_size,
+        3,
+    )
+    projected_origin, _ = cv2.projectPoints(
+        np.zeros((1, 3), dtype=float),
+        box_rotation_vector,
+        box_translation,
+        camera_matrix,
+        distortion,
+    )
+    origin_pixel = tuple(np.rint(projected_origin.reshape(2)).astype(int))
+    cv2.putText(
+        bgr_image,
+        "BOX",
+        (origin_pixel[0] + 8, origin_pixel[1] - 8),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    return cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
 
 
 def pose_message(transform: np.ndarray, frame_id: str, node: Node) -> PoseStamped:
@@ -348,6 +457,7 @@ def declare_parameters(node: Node) -> dict[str, object]:
     """Declare and return the estimator's ROS parameters."""
     intrinsics = CAMERA_CFG["intrinsics"]
     defaults = {
+        # "image_topic": "/camera/camera/color/image_raw",
         "image_topic": "/camera/image_raw",
         "output_topic": "/aruco_box_pose",
         "marker_size": 0.115,
@@ -356,7 +466,7 @@ def declare_parameters(node: Node) -> dict[str, object]:
         "frame_timeout_sec": 5.0,
         "image_timeout_sec": 5.0,
         "visualize_image": True,
-        "visualization_duration_ms": 2000,
+        "visualization_duration_ms": 0,
         "fx": float(intrinsics["fx"]),
         "fy": float(intrinsics.get("fy", intrinsics["fx"])),
         "cx": float(intrinsics["cx"]),
@@ -375,12 +485,6 @@ def run(node: Node) -> None:
         str(parameters["image_topic"]),
         float(parameters["image_timeout_sec"]),
     )
-    if bool(parameters["visualize_image"]):
-        visualize_camera_image(
-            node,
-            image,
-            int(parameters["visualization_duration_ms"]),
-        )
     base_to_ee = lookup_transform(
         node,
         str(parameters["base_frame"]),
@@ -400,11 +504,15 @@ def run(node: Node) -> None:
         ],
         dtype=float,
     )
-    marker_centers = detect_marker_centers(
+    marker_poses, marker_corners = detect_marker_poses(
         image,
         float(parameters["marker_size"]),
         camera_matrix,
     )
+    marker_centers = {
+        marker_id: transform[:3, 3].copy()
+        for marker_id, transform in marker_poses.items()
+    }
     marker_ids_text = ", ".join(
         str(marker_id) for marker_id in sorted(marker_centers)
     )
@@ -423,6 +531,21 @@ def run(node: Node) -> None:
     delivery_deadline = time.monotonic() + 0.5
     while time.monotonic() < delivery_deadline:
         rclpy.spin_once(node, timeout_sec=0.05)
+
+    if bool(parameters["visualize_image"]):
+        annotated_image = draw_pose_overlay(
+            image,
+            marker_poses,
+            marker_corners,
+            camera_to_box,
+            camera_matrix,
+            float(parameters["marker_size"]),
+        )
+        visualize_camera_image(
+            node,
+            annotated_image,
+            int(parameters["visualization_duration_ms"]),
+        )
 
 
 def main(args=None) -> None:
