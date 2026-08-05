@@ -14,11 +14,12 @@ from blow_from_mesh_helpers.config import (
     DETECTION_STAGING_TARGET,
     IMG_TOPIC,
     INIT_TARGET,
-    QUERY_PIXELS,
     MESH_DIMENSION,
+    QUERY_PIXELS,
     WLD_TO_BASE_R,
     WLD_TO_BASE_T,
-    WLD_TO_CNC,
+    WLD_TO_CNC_R,
+    WLD_TO_CNC_T,
 )
 from blow_from_mesh_helpers.detection import (
     RGBDChipDetector,
@@ -27,7 +28,7 @@ from blow_from_mesh_helpers.detection import (
     sample_pixels_from_pdf,
     visualize_pdf_debug,
 )
-from blow_from_mesh_helpers.math_utils import make_SE3
+from blow_from_mesh_helpers.math_utils import make_mesh_world_transform, make_SE3
 from blow_from_mesh_helpers.mesh_pose import (
     compute_keyframe_from_pixel,
     get_query_pixels,
@@ -55,10 +56,16 @@ def main(args=None):
     # Place the geometry in the global/world coordinate system once here so
     # visualization, ray casting, normal queries, and MoveIt collision geometry
     # all consume the same transformed mesh.
-    mesh_translation_world = WLD_TO_CNC + CNC_MESH_LOCAL_OFFSET
-    CNC_mesh.apply_translation(mesh_translation_world * MESH_DIMENSION)
+    R_w_cnc = WLD_TO_CNC_R.as_matrix()
+    mesh_world_transform = make_mesh_world_transform(
+        R_w_cnc,
+        WLD_TO_CNC_T,
+        CNC_MESH_LOCAL_OFFSET,
+        MESH_DIMENSION,
+    )
+    CNC_mesh.apply_transform(mesh_world_transform)
 
-    T_w_cnc = make_SE3(trimesh.transformations.identity_matrix()[:3, :3], WLD_TO_CNC)
+    T_w_cnc = make_SE3(R_w_cnc, WLD_TO_CNC_T)
     print("[mesh] T_world_cnc from YAML:\n", T_w_cnc)
     if any(abs(value) > 0.0 for value in CNC_MESH_LOCAL_OFFSET):
         print("[mesh] OBJ local offset [m]:", CNC_MESH_LOCAL_OFFSET)

@@ -52,31 +52,33 @@ transforms:
     translation: [-0.61, 0.365, 0.91]
   link_to_camera:
     # real
-    # quaternion_xyzw: [0.0069, -0.6980, 0.7160, -0.0045]
-    # translation: [-0.0336, 0.0378, 0.1082]
+    quaternion_xyzw: [0.0069, -0.6980, 0.7160, -0.0045]
+    translation: [-0.0336, 0.0378, 0.1082]
     # gazebo
-    quaternion_xyzw: [0, 0, 0.0, 1.0 ]
-    translation: [0.05, 0.0, 0.01]
+    # quaternion_xyzw: [0, 0, 0.0, 1.0 ]
+    # translation: [0.05, 0.0, 0.01]
   gazebo_to_optical:
     matrix:
       # real
-      # - [0.0, -1.0, 0.0]
-      # - [0.0, 0.0, -1.0]
-      # - [1.0, 0.0, 0.0]
-      # gazebo
       - [0.0, -1.0, 0.0]
+      - [0.0, 0.0, -1.0]
       - [1.0, 0.0, 0.0]
-      - [0.0, 0.0, 1.0]
+      # gazebo
+      # - [0.0, -1.0, 0.0]
+      # - [1.0, 0.0, 0.0]
+      # - [0.0, 0.0, 1.0]
     translation: [0.0, 0.0, 0.0]
 
 mesh:
   path: meshes/Vice.obj
   dimension: 1000.0
-  world_to_cnc: [-0.60376, 0.904021, 0.8]
+  world_to_cnc:
+    euler_xyz: [0.028991, 0.003466, 0.427520]
+    degrees: false
+    translation: [-0.621294, 0.985948, 0.598539]
   # Offset from Vice.obj's native origin to its bottom-center CNC frame, in metres.
   # This matches VICE_MESH_LOCAL_OFFSET in chip_blowing_gazebo.launch.py.
   mesh_local_offset_m: [-1.591830368, -0.005995712, -0.432000008]
-  # world_to_cnc: [-10.0, 0.0, 0.8]
   normal_query_radius: 10.0
   velocity_scaling: 0.2
   acceleration_scaling: 0.2

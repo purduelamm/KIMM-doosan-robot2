@@ -61,7 +61,10 @@ transforms:
 mesh:
   path: meshes/SMEC_MVF5000_SN51.obj
   dimension: 1.0
-  world_to_cnc: [0.0, 0.0, 0.0]
+  world_to_cnc:
+    euler_xyz: [0.0, 0.0, 0.0]
+    degrees: false
+    translation: [0.0, 0.0, 0.0]
   normal_query_radius: 10.
   velocity_scaling: 0.2
   acceleration_scaling: 0.2

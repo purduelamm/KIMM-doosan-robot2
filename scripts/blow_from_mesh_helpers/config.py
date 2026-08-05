@@ -1,5 +1,6 @@
 import os
 import sys
+from collections.abc import Mapping
 
 import numpy as np
 import yaml
@@ -97,6 +98,31 @@ def translation_from_config(cfg: dict) -> np.ndarray:
     return np.array(cfg.get("translation", [0.0, 0.0, 0.0]), dtype=float)
 
 
+def world_to_cnc_from_config(cfg: object) -> tuple[R, np.ndarray]:
+    """Parse the world-from-CNC pose, including the legacy translation form."""
+    if isinstance(cfg, Mapping):
+        try:
+            rotation = rotation_from_config(cfg)
+            translation = translation_from_config(cfg)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid mesh.world_to_cnc pose: {exc}") from exc
+    else:
+        rotation = R.identity()
+        try:
+            translation = np.array(cfg, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "mesh.world_to_cnc must be a pose mapping or three-value "
+                "legacy translation list."
+            ) from exc
+
+    if translation.shape != (3,):
+        raise ValueError(
+            "mesh.world_to_cnc translation must contain exactly three values."
+        )
+    return rotation, translation
+
+
 CONFIG = load_config()
 
 ROBOT_ID = CONFIG["robot"]["id"]
@@ -117,12 +143,14 @@ WLD_TO_BASE_R = rotation_from_config(TRANSFORMS["world_to_base"])
 WLD_TO_BASE_T = translation_from_config(TRANSFORMS["world_to_base"])
 L6_TO_CAM_R = rotation_from_config(TRANSFORMS["link_to_camera"])
 L6_TO_CAM_T = translation_from_config(TRANSFORMS["link_to_camera"])
-WLD_TO_CNC = np.array(CONFIG["mesh"].get("world_to_cnc", [0.0, 0.0, 0.0]), dtype=float)
+WLD_TO_CNC_R, WLD_TO_CNC_T = world_to_cnc_from_config(
+    CONFIG["mesh"].get("world_to_cnc", [0.0, 0.0, 0.0])
+)
+# Retain the translation-only name for external scripts using the old constant.
+WLD_TO_CNC = WLD_TO_CNC_T
 CNC_MESH_LOCAL_OFFSET = np.array(
     CONFIG["mesh"].get("mesh_local_offset_m", [0.0, 0.0, 0.0]), dtype=float
 )
-if WLD_TO_CNC.shape != (3,):
-    raise ValueError("mesh.world_to_cnc must contain exactly three translation values.")
 if CNC_MESH_LOCAL_OFFSET.shape != (3,):
     raise ValueError("mesh.mesh_local_offset_m must contain exactly three values.")
 
