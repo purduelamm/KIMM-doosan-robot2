@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1]
@@ -11,6 +12,75 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import aruco_box_pose as pose_estimator
+
+
+def test_construct_box_transform_uses_marker_corners_as_box_axes():
+    expected_rotation = Rotation.from_euler("xyz", [0.25, -0.4, 0.7]).as_matrix()
+    expected_translation = np.array([0.3, -0.2, 1.1])
+    local_corners = {
+        1: np.array([0.4, 0.2, 0.0]),
+        2: np.array([-0.4, 0.2, 0.0]),
+        3: np.array([0.4, -0.2, 0.0]),
+        4: np.array([-0.4, -0.2, 0.0]),
+    }
+    camera_corners = {
+        marker_id: expected_rotation @ corner + expected_translation
+        for marker_id, corner in local_corners.items()
+    }
+
+    camera_to_box = pose_estimator.construct_box_transform(camera_corners)
+
+    np.testing.assert_allclose(camera_to_box[:3, :3], expected_rotation)
+    np.testing.assert_allclose(camera_to_box[:3, 3], expected_translation)
+
+
+def test_link6_to_camera_transform_composes_both_configured_poses(monkeypatch):
+    link6_rotation = Rotation.from_euler("xyz", [0.2, -0.3, 0.4])
+    optical_rotation = Rotation.from_euler("xyz", [-0.5, 0.1, 0.25])
+    link6_translation = np.array([0.12, -0.07, 0.21])
+    optical_translation = np.array([0.03, 0.04, -0.02])
+    monkeypatch.setattr(pose_estimator, "L6_TO_CAM_R", link6_rotation)
+    monkeypatch.setattr(pose_estimator, "L6_TO_CAM_T", link6_translation)
+    monkeypatch.setattr(pose_estimator, "GAZ_TO_OPT_R", optical_rotation)
+    monkeypatch.setattr(pose_estimator, "GAZ_TO_OPT_T", optical_translation)
+
+    expected = pose_estimator.make_transform(
+        link6_rotation.as_matrix(), link6_translation
+    ) @ pose_estimator.make_transform(
+        optical_rotation.as_matrix(), optical_translation
+    )
+
+    np.testing.assert_allclose(pose_estimator.link6_to_camera_transform(), expected)
+
+
+def test_configured_camera_offset_affects_base_to_box_pose(monkeypatch):
+    link6_rotation = Rotation.from_euler("z", 0.35)
+    optical_rotation = Rotation.from_euler("y", -0.45)
+    link6_translation = np.array([0.08, -0.03, 0.14])
+    optical_translation = np.array([0.01, 0.02, -0.04])
+    monkeypatch.setattr(pose_estimator, "L6_TO_CAM_R", link6_rotation)
+    monkeypatch.setattr(pose_estimator, "L6_TO_CAM_T", link6_translation)
+    monkeypatch.setattr(pose_estimator, "GAZ_TO_OPT_R", optical_rotation)
+    monkeypatch.setattr(pose_estimator, "GAZ_TO_OPT_T", optical_translation)
+
+    base_to_link6 = pose_estimator.make_transform(
+        Rotation.from_euler("x", 0.6).as_matrix(), [0.4, -0.2, 0.7]
+    )
+    optical_to_box = pose_estimator.make_transform(
+        Rotation.from_euler("z", -0.2).as_matrix(), [0.1, 0.05, 0.8]
+    )
+    expected = (
+        base_to_link6
+        @ pose_estimator.make_transform(link6_rotation.as_matrix(), link6_translation)
+        @ pose_estimator.make_transform(optical_rotation.as_matrix(), optical_translation)
+        @ optical_to_box
+    )
+
+    base_to_camera = pose_estimator.compose_base_camera_transform(base_to_link6)
+    base_to_box = base_to_camera @ optical_to_box
+
+    np.testing.assert_allclose(base_to_box, expected)
+    assert not np.allclose(base_to_box, base_to_link6 @ optical_to_box)
 
 
 def test_detect_marker_poses_retains_rotation_translation_and_corners(monkeypatch):

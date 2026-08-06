@@ -19,6 +19,7 @@ from tf2_ros import Buffer, TransformListener
 from blow_from_mesh_helpers.config import (
     CAMERA_CFG,
     GAZ_TO_OPT_R,
+    GAZ_TO_OPT_T,
     L6_TO_CAM_R,
     L6_TO_CAM_T,
 )
@@ -50,8 +51,15 @@ def transform_from_tf_message(transform_msg) -> np.ndarray:
 
 def link6_to_camera_transform() -> np.ndarray:
     """Return the calibrated link-6-to-optical-camera transform."""
-    rotation = (L6_TO_CAM_R * GAZ_TO_OPT_R).as_matrix()
-    return make_transform(rotation, L6_TO_CAM_T)
+    link6_to_camera_model = make_transform(
+        L6_TO_CAM_R.as_matrix(),
+        L6_TO_CAM_T,
+    )
+    camera_model_to_optical = make_transform(
+        GAZ_TO_OPT_R.as_matrix(),
+        GAZ_TO_OPT_T,
+    )
+    return link6_to_camera_model @ camera_model_to_optical
 
 
 def compose_base_camera_transform(
@@ -67,9 +75,11 @@ def compose_base_camera_transform(
 def construct_box_transform(marker_centers: Mapping[int, np.ndarray]) -> np.ndarray:
     """Construct camera-to-box from four marker centers in camera coordinates.
 
-    The box origin is the four-center centroid. Its +X axis points from marker 4
-    to marker 1, +Y points from marker 3 toward marker 2 after orthogonalization,
-    and +Z completes the right-handed frame.
+    Marker IDs are corners laid out as 2--1 on the top edge and 4--3 on the
+    bottom edge. The box origin is the four-corner centroid. Its +X axis points
+    from the left edge toward the right edge, +Y points from the bottom edge
+    toward the top edge after orthogonalization, and +Z completes the
+    right-handed frame.
     """
     missing = sorted(set(EXPECTED_MARKER_IDS) - set(marker_centers))
     if missing:
@@ -83,20 +93,21 @@ def construct_box_transform(marker_centers: Mapping[int, np.ndarray]) -> np.ndar
         raise ValueError("Marker centers contain non-finite values.")
 
     origin = np.mean(list(centers.values()), axis=0)
-    x_raw = centers[1] - centers[4]
-    y_raw = centers[2] - centers[3]
+    x_raw = 0.5 * ((centers[1] - centers[2]) + (centers[3] - centers[4]))
+    y_raw = 0.5 * ((centers[1] - centers[3]) + (centers[2] - centers[4]))
 
     epsilon = 1e-9
     x_norm = np.linalg.norm(x_raw)
     if x_norm < epsilon:
-        raise ValueError("Degenerate box geometry: markers 1 and 4 coincide.")
+        raise ValueError("Degenerate box geometry: left and right edges coincide.")
     x_axis = x_raw / x_norm
 
     y_orthogonal = y_raw - np.dot(y_raw, x_axis) * x_axis
     y_norm = np.linalg.norm(y_orthogonal)
     if y_norm < epsilon:
         raise ValueError(
-            "Degenerate box geometry: marker ID axes are parallel or markers 2 and 3 coincide."
+            "Degenerate box geometry: box edges are parallel or the top and "
+            "bottom edges coincide."
         )
     y_axis = y_orthogonal / y_norm
 
@@ -485,15 +496,16 @@ def run(node: Node) -> None:
         str(parameters["image_topic"]),
         float(parameters["image_timeout_sec"]),
     )
-    base_to_ee = lookup_transform(
+    base_to_link6 = lookup_transform(
         node,
         str(parameters["base_frame"]),
         str(parameters["ee_frame"]),
         float(parameters["frame_timeout_sec"]),
     )
-    base_to_camera = compose_base_camera_transform(base_to_ee)
+    base_to_camera = compose_base_camera_transform(base_to_link6)
     node.get_logger().info(
-        "Calculated optical-camera pose from the current end-effector TF and calibration."
+        "Calculated optical-camera pose from base-to-link-6 TF and configured "
+        "link-to-camera and camera-to-optical transforms."
     )
 
     camera_matrix = np.array(
