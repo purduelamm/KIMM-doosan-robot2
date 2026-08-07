@@ -15,7 +15,9 @@ robot:
     type: joint_values
     values: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-motion_backend: moveit
+# Keep MoveIt for setup moves, then execute the detected blowing path as one
+# controller-side Cartesian spline.
+motion_backend: doosan_spline
 
 tool_control:
   enabled: true
@@ -89,6 +91,9 @@ mesh:
   collision_object_id: cnc_mesh_obstacl0
   normal_sample_count: 5000000
   surface_offset_m: 0.2
+  # World-frame XY plane used only when a detected pixel ray misses the mesh.
+  ray_miss_fallback_plane:
+    world_z_m: 0.6
   pose_mode: fixed_blower_z_axis
   fixed_blower_z_axis:
     angle_from_world_y_deg: 90.0
@@ -118,8 +123,8 @@ moveit:
   z_axis_only_orientation: true
   free_z_axis_tolerance: 3.14159
   yaw_optimization_deg: [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180]
-  velocity_scaling: 0.2
-  acceleration_scaling: 0.2
+  velocity_scaling: 1.0
+  acceleration_scaling: 0.7
   collision_object_id: cnc_mesh_obstacl
   allow_cnc_collision_links: []
   collision_margin_m: 0.05
@@ -152,7 +157,7 @@ point_input:
   use_interactive_picker_when_query_pixels_empty: true
 
 chip_detector:
-  enabled: false
+  enabled: true
   frames_to_average: 30
   frame_timeout_sec: 10.0
   reference_timeout_sec: 15.0
@@ -190,6 +195,12 @@ chip_detector:
     y_max: 550
 
 execution:
-  execute_gazebo_first: true
+  execute_gazebo_first: false
   confirm_real_execution: true
   online_segment_settle_sec: 0.2
+  continuous_spline:
+    velocity: 50.0
+    acceleration: 50.0
+    # Doosan MAX_SPLINE_POINT is 100. The dense guide is sampled to this
+    # count and submitted in one movesx request.
+    max_waypoints: 100

@@ -65,6 +65,11 @@ from EEpose_from_mesh.mesh_utils import (
 from .detection import grab_image
 from .ui import pick_xy_from_camera
 
+
+class MeshRayMissError(RuntimeError):
+    """Raised when a camera ray does not intersect the CNC mesh."""
+
+
 def pixel_to_world(
     pu: float, pv: float, z_cam: float, T_w_cm: np.ndarray
 ) -> np.ndarray:
@@ -145,7 +150,7 @@ def get_depth_from_mesh(
     )
 
     if len(locations) == 0:
-        raise RuntimeError(f"No mesh surface hit for pixel ({pu:.1f}, {pv:.1f})")
+        raise MeshRayMissError(f"No mesh surface hit for pixel ({pu:.1f}, {pv:.1f})")
 
     # closest hit to camera
     dists = np.linalg.norm(locations - cam_pos_mesh, axis=1)
@@ -167,6 +172,35 @@ def get_depth_from_mesh(
     return hit_cam[2]
 
 
+def get_depth_from_world_xy_plane(
+    pu: float,
+    pv: float,
+    T_w_cm: np.ndarray,
+    world_z_m: float,
+) -> float:
+    """Return camera depth where a pixel ray meets ``world z = world_z_m``."""
+    ray_camera = np.linalg.inv(camera_K) @ np.array([pu, pv, 1.0])
+    ray_world = T_w_cm[:3, :3] @ ray_camera
+    ray_origin_world = T_w_cm[:3, 3]
+
+    if abs(ray_world[2]) < 1e-12:
+        raise RuntimeError(
+            f"Pixel ({pu:.1f}, {pv:.1f}) ray is parallel to the fallback XY plane."
+        )
+
+    distance_along_ray = (world_z_m - ray_origin_world[2]) / ray_world[2]
+    if distance_along_ray <= 0.0:
+        raise RuntimeError(
+            f"Fallback XY plane z={world_z_m:.6f} m is behind the camera for "
+            f"pixel ({pu:.1f}, {pv:.1f})."
+        )
+
+    hit_world = ray_origin_world + distance_along_ray * ray_world
+    hit_world[2] = world_z_m
+    hit_camera = np.linalg.inv(T_w_cm) @ np.append(hit_world, 1.0)
+    return float(hit_camera[2])
+
+
 def compute_keyframe_from_pixel(
     pu: float,
     pv: float,
@@ -174,10 +208,27 @@ def compute_keyframe_from_pixel(
     cnc_mesh: trimesh.Trimesh,
 ) -> np.ndarray:
     mesh_cfg = CONFIG["mesh"]
-    z_cam = get_depth_from_mesh(pu, pv, T_w_cm, cnc_mesh)
-    print("depth: ", z_cam, " world_z: ", T_w_cm[2, 3] - z_cam)
+    used_fallback_plane = False
+    try:
+        z_cam = get_depth_from_mesh(pu, pv, T_w_cm, cnc_mesh)
+    except MeshRayMissError:
+        fallback_cfg = mesh_cfg.get("ray_miss_fallback_plane", {})
+        if "world_z_m" not in fallback_cfg:
+            raise ValueError(
+                "mesh.ray_miss_fallback_plane.world_z_m must be set in the YAML config."
+            )
+        fallback_world_z = float(fallback_cfg["world_z_m"])
+        z_cam = get_depth_from_world_xy_plane(
+            pu, pv, T_w_cm, fallback_world_z
+        )
+        used_fallback_plane = True
+        print(
+            f"[raycast] Pixel ({pu:.1f}, {pv:.1f}) missed the CNC mesh; "
+            f"using world XY plane z={fallback_world_z:.6f} m."
+        )
 
     query_world = pixel_to_world(pu, pv, z_cam, T_w_cm)
+    print(f"depth: {z_cam}  world_z: {query_world[2]}")
     print(f"[main] query_world: {query_world}")
 
     pose_mode = mesh_cfg.get("pose_mode", "mesh_normal")
@@ -193,14 +244,25 @@ def compute_keyframe_from_pixel(
     query_mesh_z = query_world[2] * MESH_DIMENSION
     print(f"[main] query_mesh_x={query_mesh_x:.2f}  query_mesh_y={query_mesh_y:.2f}")
 
-    normals = query_mesh_normals(
-        cnc_mesh,
-        query_mesh_x,
-        query_mesh_y,
-        mesh_cfg["normal_query_radius"],
-        total_points=mesh_cfg["normal_sample_count"],
-        z=query_mesh_z,
-    )
+    if used_fallback_plane:
+        plane_normal = np.array([0.0, 0.0, 1.0])
+        if T_w_cm[2, 3] < query_world[2]:
+            plane_normal *= -1.0
+        surface_point_mesh = query_world * MESH_DIMENSION
+        normals = {
+            "surface_point": surface_point_mesh,
+            "roi_points": surface_point_mesh.reshape(1, 3),
+            "unique_normals": plane_normal.reshape(1, 3),
+        }
+    else:
+        normals = query_mesh_normals(
+            cnc_mesh,
+            query_mesh_x,
+            query_mesh_y,
+            mesh_cfg["normal_query_radius"],
+            total_points=mesh_cfg["normal_sample_count"],
+            z=query_mesh_z,
+        )
     cam_pos_mesh = T_w_cm[:3, 3] * MESH_DIMENSION
     surface_to_camera = cam_pos_mesh - normals["surface_point"]
     surface_to_camera_norm = np.linalg.norm(surface_to_camera)
