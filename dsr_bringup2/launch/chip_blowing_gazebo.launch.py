@@ -299,9 +299,11 @@ def move_group_fn(context):
 def generate_launch_description():
     ARGUMENTS =[ 
         DeclareLaunchArgument('name',         default_value = 'dsr01',          description = 'NAME_SPACE'              ),
-        DeclareLaunchArgument('host',         default_value = '127.0.0.1',      description = 'ROBOT_IP'                ),
+        # DeclareLaunchArgument('host',         default_value = '127.0.0.1',      description = 'ROBOT_IP'                ),
+        DeclareLaunchArgument('host',         default_value = '192.168.137.100',      description = 'ROBOT_IP'                ),
         DeclareLaunchArgument('port',         default_value = '12345',          description = 'ROBOT_PORT'              ),
-        DeclareLaunchArgument('mode',         default_value = 'virtual',        description = 'OPERATION MODE'          ),
+        # DeclareLaunchArgument('mode',         default_value = 'virtual',        description = 'OPERATION MODE'          ),
+        DeclareLaunchArgument('mode',         default_value = 'real',        description = 'OPERATION MODE'          ),
         DeclareLaunchArgument('model',        default_value = 'm0609',          description = 'ROBOT_MODEL'             ),
         DeclareLaunchArgument('color',        default_value = 'white',          description = 'ROBOT_COLOR'             ),
         DeclareLaunchArgument('gui',          default_value = 'true',          description = 'Start RViz2'             ),

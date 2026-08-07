@@ -1027,7 +1027,7 @@ def check_reachable(
     if dist > robot_reach:
         print(f"[check] UNREACHABLE: distance {dist*1000:.1f}mm > {robot_reach*1000:.0f}mm")
         return False
-    if t[2] < -0.05:
+    if t[2] < -2:
         print(f"[check] UNREACHABLE: z={t[2]*1000:.1f}mm is below base plane")
         return False
     return True

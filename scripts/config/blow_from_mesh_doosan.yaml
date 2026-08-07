@@ -22,28 +22,28 @@ tool_control:
   type: doosan_tool_digital_output
 
 # real
-# camera:
-#   image_topic: /camera/camera/color/image_raw/compressed
-#   rgb_topic: /camera/camera/color/image_raw
-#   depth_topic: /camera/camera/aligned_depth_to_color/image_raw
-#   depth_unit: auto
-#   intrinsics:
-#     fx: 611.9779052734375
-#     fy: 611.1830444335938
-#     cx: 315.73968505859375
-#     cy: 232.30418395996094
-
-# gazebo
 camera:
-  image_topic: /camera/image_raw/compressed
-  rgb_topic: /camera/image_raw
+  image_topic: /camera/camera/color/image_raw/compressed
+  rgb_topic: /camera/camera/color/image_raw
   depth_topic: /camera/camera/aligned_depth_to_color/image_raw
   depth_unit: auto
   intrinsics:
-    fx: 762.7223
-    fy: 762.7223
-    cx: 640.0
-    cy: 320.0
+    fx: 611.9779052734375
+    fy: 611.1830444335938
+    cx: 315.73968505859375
+    cy: 232.30418395996094
+
+# gazebo
+# camera:
+#   image_topic: /camera/image_raw/compressed
+#   rgb_topic: /camera/image_raw
+#   depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+#   depth_unit: auto
+#   intrinsics:
+#     fx: 762.7223
+#     fy: 762.7223
+#     cx: 640.0
+#     cy: 320.0
 
 transforms:
   world_to_base:
@@ -72,10 +72,14 @@ transforms:
 mesh:
   path: meshes/Vice.obj
   dimension: 1000.0
+  # world_to_cnc:
+    # euler_xyz: [0.028991, 0.003466, 0.427520]
+    # degrees: false
+    # translation: [-0.621294, 0.985948, 0.598539]
   world_to_cnc:
-    euler_xyz: [0.028991, 0.003466, 0.427520]
+    euler_xyz: [0.001910, 0.022992, -0.051017]
     degrees: false
-    translation: [-0.621294, 0.985948, 0.598539]
+    translation: [-0.670924, 0.907457, 0.599334]
   # Offset from Vice.obj's native origin to its bottom-center CNC frame, in metres.
   # This matches VICE_MESH_LOCAL_OFFSET in chip_blowing_gazebo.launch.py.
   mesh_local_offset_m: [-1.591830368, -0.005995712, -0.432000008]
@@ -87,8 +91,8 @@ mesh:
   surface_offset_m: 0.2
   pose_mode: fixed_blower_z_axis
   fixed_blower_z_axis:
-    angle_from_world_y_deg: 45.0
-    distance_m: 0.2
+    angle_from_world_y_deg: 90.0
+    distance_m: 0.3
 
 path_actions:
   cone_sweep:

@@ -468,8 +468,8 @@ def declare_parameters(node: Node) -> dict[str, object]:
     """Declare and return the estimator's ROS parameters."""
     intrinsics = CAMERA_CFG["intrinsics"]
     defaults = {
-        # "image_topic": "/camera/camera/color/image_raw",
-        "image_topic": "/camera/image_raw",
+        "image_topic": "/camera/camera/color/image_raw",
+        # "image_topic": "/camera/image_raw",
         "output_topic": "/aruco_box_pose",
         "marker_size": 0.115,
         "base_frame": "base_link",
