@@ -54,6 +54,7 @@ from .ros_context import (
     is_doosan_robot,
     movej,
     movel,
+    movesx,
     node,
     posj,
     posx,
@@ -278,7 +279,7 @@ class MoveItMotionBackend(MotionBackend):
 
 
 class DoosanDirectMotionBackend(MotionBackend):
-    """Editable direct-motion backend for users who want movel/movej commands."""
+    """Direct Doosan backend using point moves and continuous task splines."""
 
     def apply_obstacles(self, cnc_mesh: trimesh.Trimesh, T_w_b: np.ndarray) -> None:
         pass
@@ -291,14 +292,62 @@ class DoosanDirectMotionBackend(MotionBackend):
 
     def execute_plan(self, plan) -> None:
         if isinstance(plan, TrajectoryPlan):
-            for target in plan.robot_trajectories:
-                self.execute_plan(target)
+            self.execute_continuous_spline(plan.robot_trajectories)
             return
         if isinstance(plan, list) and len(plan) == len(MOVEIT_JOINT_NAMES):
             self.move_to_joints(plan)
             return
         doosan_pose = se3_to_doosan_posx(plan)
         movel(posx(*doosan_pose), vel=50, acc=50)
+
+    def execute_continuous_spline(self, base_poses: list[np.ndarray]) -> None:
+        """Send the entire blowing pass as one controller-side spline."""
+        cfg = CONFIG.get("execution", {}).get("continuous_spline", {})
+        vel = float(cfg.get("velocity", 50.0))
+        acc = float(cfg.get("acceleration", 50.0))
+        max_waypoints = int(cfg.get("max_waypoints", 100))
+        if not 2 <= max_waypoints <= 100:
+            raise ValueError(
+                "execution.continuous_spline.max_waypoints must be between 2 and "
+                "the Doosan controller limit of 100."
+            )
+        if len(base_poses) < 2:
+            raise RuntimeError("[exec] A continuous spline requires at least two poses.")
+
+        if len(base_poses) > max_waypoints:
+            sample_indices = np.linspace(
+                0, len(base_poses) - 1, max_waypoints, dtype=int
+            )
+            spline_poses = [base_poses[i] for i in sample_indices]
+        else:
+            spline_poses = list(base_poses)
+
+        print(f"[exec] Pre-flight check on {len(spline_poses)} spline waypoints...")
+        doosan_values = []
+        for i, T_base_ee in enumerate(spline_poses):
+            if not check_reachable(T_base_ee):
+                raise RuntimeError(
+                    f"[exec] Spline waypoint {i} is unreachable; aborting before motion. "
+                    f"base={T_base_ee[:3, 3]}"
+                )
+            doosan_values.append(se3_to_doosan_posx(T_base_ee))
+
+        # Keep equivalent ZYZ Euler angles on one branch. Otherwise a benign
+        # +/-360-degree representation change could cause a real wrist turn.
+        angles = np.deg2rad(np.asarray(doosan_values, dtype=float)[:, 3:6])
+        unwrapped_angles = np.rad2deg(np.unwrap(angles, axis=0))
+        for values, continuous_angles in zip(doosan_values, unwrapped_angles):
+            values[3:6] = continuous_angles.tolist()
+
+        spline_targets = [posx(*values) for values in doosan_values]
+        print(
+            f"[exec] Sending one continuous Doosan spline with "
+            f"{len(spline_targets)} waypoints (vel={vel:g}, acc={acc:g})..."
+        )
+        result = movesx(spline_targets, vel=vel, acc=acc)
+        if result != 0:
+            raise RuntimeError(f"[exec] Doosan spline command failed with code {result}.")
+        print("[exec] Continuous Doosan spline complete.")
 
     def move_to_joints(self, joints_or_target) -> None:
         target = normalize_motion_target(joints_or_target)
@@ -309,6 +358,18 @@ class DoosanDirectMotionBackend(MotionBackend):
         movej(posj(*joints), vel=60, acc=60)
 
 
+class DoosanSplineMotionBackend(MoveItMotionBackend):
+    """Use MoveIt for setup moves and one Doosan spline for the blowing pass."""
+
+    def execute_plan(self, plan) -> None:
+        if isinstance(plan, TrajectoryPlan):
+            DoosanDirectMotionBackend.execute_continuous_spline(
+                self, plan.robot_trajectories
+            )
+            return
+        super().execute_plan(plan)
+
+
 def create_motion_backend() -> MotionBackend:
     backend_name = CONFIG.get("motion_backend", "moveit")
     if backend_name == "moveit":
@@ -317,6 +378,10 @@ def create_motion_backend() -> MotionBackend:
         if not is_doosan_robot():
             raise ValueError("motion_backend 'doosan_direct' is only supported for robot.type 'doosan'.")
         return DoosanDirectMotionBackend()
+    if backend_name == "doosan_spline":
+        if not is_doosan_robot():
+            raise ValueError("motion_backend 'doosan_spline' is only supported for robot.type 'doosan'.")
+        return DoosanSplineMotionBackend()
     raise ValueError(f"Unsupported motion_backend '{backend_name}'.")
 
 
@@ -325,8 +390,8 @@ def create_motion_backend() -> MotionBackend:
 @dataclass
 class TrajectoryPlan:
     """
-    Cartesian guide poses are kept for visualization; robot_trajectories are
-    the MoveIt collision-checked plans used for execution.
+    Cartesian guide poses are kept for visualization. ``robot_trajectories``
+    contains either MoveIt robot trajectories or direct-backend base poses.
     """
 
     poses: list[np.ndarray]
@@ -937,10 +1002,9 @@ def generate_smooth_trajectory(
     motion_backend: MotionBackend | None = None,
 ) -> TrajectoryPlan:
     """
-    Generate a trajectory through the keyframes. When T_w_b and cnc_mesh are
-    provided, the CNC mesh is added to MoveIt2 as a collision object and each
-    segment is planned by MoveIt2. The returned Cartesian poses are only a
-    visualization guide; execution uses MoveIt's robot trajectories.
+    Generate a trajectory through the keyframes. The MoveIt backend prepares
+    collision-aware online target groups. The Doosan direct backend converts
+    the dense guide to base-frame poses for one controller-side spline call.
     """
     if len(poses) < 1:
         raise ValueError("Need at least 1 pose to generate a trajectory.")
@@ -995,10 +1059,14 @@ def generate_smooth_trajectory(
 
         target_base_pose_groups.append(group)
 
-    print(
-        f"[moveit] Prepared {len(target_base_pose_groups)} keypoint group(s) "
-        f"and {len(target_world_poses)} target pose(s) for online planning."
+    uses_doosan_spline = isinstance(
+        backend, (DoosanDirectMotionBackend, DoosanSplineMotionBackend)
     )
+    if isinstance(backend, MoveItMotionBackend) and not uses_doosan_spline:
+        print(
+            f"[moveit] Prepared {len(target_base_pose_groups)} keypoint group(s) "
+            f"and {len(target_world_poses)} target pose(s) for online planning."
+        )
     if len(target_world_poses) >= 2:
         cartesian_guide = generate_cartesian_guide_trajectory(
             target_world_poses,
@@ -1007,6 +1075,19 @@ def generate_smooth_trajectory(
     else:
         cartesian_guide = target_world_poses
 
+    if uses_doosan_spline:
+        base_guide = [mesh_pose_to_base(pose, T_w_b) for pose in cartesian_guide]
+        print(
+            f"[traj] Prepared one controller-side Cartesian spline from "
+            f"{len(base_guide)} guide poses."
+        )
+        return TrajectoryPlan(
+            poses=cartesian_guide,
+            robot_trajectories=base_guide,
+            planned_with_moveit=False,
+            target_poses=target_world_poses,
+        )
+
     return TrajectoryPlan(
         poses=cartesian_guide,
         robot_trajectories=[],
@@ -1014,6 +1095,8 @@ def generate_smooth_trajectory(
         target_poses=target_world_poses,
         target_base_pose_groups=target_base_pose_groups,
     )
+
+
 def check_reachable(
     T_base_ee: np.ndarray,
     robot_reach: float = float(CONFIG["robot"].get("reach_m", 0.900)),

@@ -194,7 +194,10 @@ def main(args=None):
             f"{len(trajectory.target_poses)} target pose(s) kept for visualization."
         )
     else:
-        print(f"[traj] Generated {len(trajectory)} interpolated poses.")
+        print(
+            f"[traj] Generated one continuous trajectory with "
+            f"{len(trajectory)} interpolated guide poses."
+        )
 
     if CONFIG.get("visualization", {}).get("show_trajectory", True):
         visualize_trajectory(
@@ -205,7 +208,7 @@ def main(args=None):
         )
 
     if execution_cfg.get("execute_gazebo_first", True):
-        print("[exec] Executing planned trajectory on the current Gazebo backend...")
+        print("[exec] Executing the continuous trajectory on the current backend...")
         ros_context.air_node.tool_airgun(True)
         time.sleep(1)
         motion_backend.execute_plan(trajectory)
