@@ -48,6 +48,19 @@ from blow_from_mesh_helpers.visualization import (
 )
 
 
+def execute_blowing_trajectory(motion_backend, trajectory) -> None:
+    """Execute one trajectory while keeping the airgun active."""
+    print("[exec] Activating airgun...")
+    try:
+        ros_context.air_node.tool_airgun(True)
+        time.sleep(1.0)
+        motion_backend.execute_plan(trajectory)
+    finally:
+        print("[exec] Deactivating airgun...")
+        ros_context.air_node.tool_airgun(False)
+        time.sleep(1.0)
+
+
 def main(args=None):
     ros_context.init_ros()
 
@@ -209,18 +222,15 @@ def main(args=None):
 
     if execution_cfg.get("execute_gazebo_first", True):
         print("[exec] Executing the continuous trajectory on the current backend...")
-        ros_context.air_node.tool_airgun(True)
-        time.sleep(1)
-        motion_backend.execute_plan(trajectory)
-        ros_context.air_node.tool_airgun(False)
-        time.sleep(1)
+        execute_blowing_trajectory(motion_backend, trajectory)
 
     if execution_cfg.get("confirm_real_execution", True):
         confirm = input(
             "[exec] Press y to execute the same planned trajectory on the real robot. [y/N]: "
         ).strip().lower()
         if confirm == "y":
-            motion_backend.execute_plan(trajectory)
+            print("[exec] Executing the continuous trajectory on the real robot...")
+            execute_blowing_trajectory(motion_backend, trajectory)
 
     rclpy.shutdown()
 
