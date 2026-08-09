@@ -33,6 +33,9 @@
       rt_timer_ms: 10                      # ms
       rt_topic_keys:                       # Field names available for RT publishing (see extract_field() in dsr_controller2.cpp)
         - actual_joint_position
+        - actual_joint_velocity
+        - actual_tcp_velocity
+        - operation_speed_rate
 
   dsr_position_controller:
     ros__parameters:

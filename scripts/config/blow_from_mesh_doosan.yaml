@@ -211,8 +211,10 @@ execution:
   confirm_real_execution: true
   online_segment_settle_sec: 0.2
   continuous_spline:
-    velocity: 300.0
-    acceleration: 150.0
+    # [TCP linear mm/s, TCP angular deg/s]
+    velocity: [1000.0, 120.0]
+    # [TCP linear mm/s^2, TCP angular deg/s^2]
+    acceleration: [1000.0, 240.0]
     # Doosan MAX_SPLINE_POINT is 100. The dense guide is sampled to this
     # count and submitted in one movesx request.
     max_waypoints: 100

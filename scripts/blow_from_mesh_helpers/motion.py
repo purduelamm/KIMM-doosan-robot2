@@ -69,6 +69,54 @@ def doosan_posx_to_base_se3(doosan_pose: list[float]) -> np.ndarray:
     return T
 
 
+def parse_doosan_task_rate(
+    value: object,
+    config_name: str,
+) -> float | list[float]:
+    """Parse scalar linear or [linear, angular] Doosan task-space rates."""
+    if isinstance(value, (list, tuple)):
+        if len(value) != 2:
+            raise ValueError(
+                f"{config_name} must be a scalar or [linear, angular] pair."
+            )
+        try:
+            parsed = [float(value[0]), float(value[1])]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{config_name} values must be numeric."
+            ) from exc
+        if not np.all(np.isfinite(parsed)) or any(rate <= 0.0 for rate in parsed):
+            raise ValueError(f"{config_name} values must be finite and positive.")
+        return parsed
+
+    if isinstance(value, bool):
+        raise ValueError(
+            f"{config_name} must be a scalar or [linear, angular] pair."
+        )
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{config_name} must be a scalar or [linear, angular] pair."
+        ) from exc
+    if not np.isfinite(parsed) or parsed <= 0.0:
+        raise ValueError(f"{config_name} must be finite and positive.")
+    return parsed
+
+
+def format_doosan_task_rate(
+    value: float | list[float],
+    linear_unit: str,
+    angular_unit: str,
+) -> str:
+    if isinstance(value, list):
+        return (
+            f"[{value[0]:g} {linear_unit}, "
+            f"{value[1]:g} {angular_unit}]"
+        )
+    return f"{value:g} {linear_unit}"
+
+
 def typed_target_to_base_se3(target: dict, T_w_b: np.ndarray | None = None) -> np.ndarray:
     target_type = target.get("type")
     if target_type == "doosan_posx":
@@ -304,8 +352,14 @@ class DoosanDirectMotionBackend(MotionBackend):
     def execute_continuous_spline(self, base_poses: list[np.ndarray]) -> None:
         """Send the entire blowing pass as one controller-side spline."""
         cfg = CONFIG.get("execution", {}).get("continuous_spline", {})
-        vel = float(cfg.get("velocity", 50.0))
-        acc = float(cfg.get("acceleration", 50.0))
+        vel = parse_doosan_task_rate(
+            cfg.get("velocity", 50.0),
+            "execution.continuous_spline.velocity",
+        )
+        acc = parse_doosan_task_rate(
+            cfg.get("acceleration", 50.0),
+            "execution.continuous_spline.acceleration",
+        )
         max_waypoints = int(cfg.get("max_waypoints", 100))
         if not 2 <= max_waypoints <= 100:
             raise ValueError(
@@ -341,9 +395,14 @@ class DoosanDirectMotionBackend(MotionBackend):
             values[3:6] = continuous_angles.tolist()
 
         spline_targets = [posx(*values) for values in doosan_values]
+        velocity_label = format_doosan_task_rate(vel, "mm/s", "deg/s")
+        acceleration_label = format_doosan_task_rate(
+            acc, "mm/s^2", "deg/s^2"
+        )
         print(
             f"[exec] Sending one continuous Doosan spline with "
-            f"{len(spline_targets)} waypoints (vel={vel:g}, acc={acc:g})..."
+            f"{len(spline_targets)} waypoints "
+            f"(vel={velocity_label}, acc={acceleration_label})..."
         )
         result = movesx(spline_targets, vel=vel, acc=acc)
         if result != 0:
