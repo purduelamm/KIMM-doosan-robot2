@@ -28,6 +28,7 @@ camera:
   image_topic: /camera/camera/color/image_raw/compressed
   rgb_topic: /camera/camera/color/image_raw
   depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+  # depth_topic: /camera/camera/depth/image_rect_raw
   depth_unit: auto
   intrinsics:
     fx: 611.9779052734375
@@ -79,9 +80,9 @@ mesh:
     # degrees: false
     # translation: [-0.621294, 0.985948, 0.598539]
   world_to_cnc:
-    euler_xyz: [-0.014909, 0.009930, -0.105385]
+    euler_xyz: [0.004869, 0.005461, -0.034056]
     degrees: false
-    translation: [-0.687306, 0.888490, 0.600276]
+    translation: [-0.685249, 0.896535, 0.600628]
   # Offset from Vice.obj's native origin to its bottom-center CNC frame, in metres.
   # This matches VICE_MESH_LOCAL_OFFSET in chip_blowing_gazebo.launch.py.
   mesh_local_offset_m: [-1.591830368, -0.005995712, -0.432000008]
@@ -165,10 +166,12 @@ chip_detector:
   baseline:
     # capture: acquire and archive a new clean baseline
     # load: use the exact archive selected by load_path
-    mode: load
+    mode: capture
     save_directory: data/blow_from_mesh_baselines
-    load_path: data/blow_from_mesh_baselines/baseline_doosan_m0609_20260809T184516_603161Z.npz
+    load_path: data/blow_from_mesh_baselines/baseline_doosan_m0609_20260809T195443_133925Z.npz
   min_valid_mm: 10.0
+  # Depth difference is forced to zero where clean baseline depth exceeds this.
+  baseline_depth_max_mm: 1000.0
   thresh_min_mm: 1.0
   thresh_max_mm: 50.0
   kmax: 5

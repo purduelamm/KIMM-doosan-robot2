@@ -641,11 +641,19 @@ class RGBDChipDetector:
             )
 
         min_valid_mm = float(self.cfg.get("min_valid_mm", 10.0))
+        baseline_depth_max_mm = float(
+            self.cfg.get("baseline_depth_max_mm", float("inf"))
+        )
+        if baseline_depth_max_mm <= 0.0 or np.isnan(baseline_depth_max_mm):
+            raise ValueError(
+                "chip_detector.baseline_depth_max_mm must be greater than zero."
+            )
         mask = roi_mask(current_depth_mm.shape, self.cfg)
         valid = (
             mask
             & (current_depth_mm > min_valid_mm)
             & (reference_depth_mm > min_valid_mm)
+            & (reference_depth_mm <= baseline_depth_max_mm)
             & np.isfinite(current_depth_mm)
             & np.isfinite(reference_depth_mm)
         )
@@ -665,13 +673,30 @@ class RGBDChipDetector:
         diff_mm = np.zeros_like(current_depth_mm, dtype=np.float32)
         diff_mm[valid] = reference_depth_mm[valid] - current_depth_mm[valid]
         self.last_depth_diff_mm = diff_mm.copy()
+        # This mask is deliberately image-wide rather than ROI-limited. RGB
+        # SIFT extraction runs over the full aligned color frame, so every
+        # feature whose baseline-depth pixel exceeds the threshold must be
+        # rejected, including features outside mask_roi.
+        beyond_baseline_depth = (
+            np.isfinite(reference_depth_mm)
+            & (reference_depth_mm > baseline_depth_max_mm)
+        )
+        beyond_baseline_depth_in_roi = mask & beyond_baseline_depth
         print(
             "[detect] Depth delta stats in ROI: "
-            f"valid={int(valid.sum())} max={float(np.nanmax(diff_mm)):.2f}mm"
+            f"valid={int(valid.sum())} "
+            f"baseline-depth-rejected="
+            f"{int(beyond_baseline_depth_in_roi.sum())} "
+            f"max={float(np.nanmax(diff_mm)):.2f}mm"
         )
 
         depth_pdf = self._depth_pdf(diff_mm)
-        rgb_pdf = self._rgb_pdf(current_rgb_bgr, current_depth_mm.shape)
+        rgb_feature_allowed_mask = ~beyond_baseline_depth
+        rgb_pdf = self._rgb_pdf(
+            current_rgb_bgr,
+            current_depth_mm.shape,
+            feature_allowed_mask=rgb_feature_allowed_mask,
+        )
         rgb_fallback_pdf = self._rgb_saliency_pdf(current_rgb_bgr, current_depth_mm.shape)
         depth_weight = float(self.cfg.get("depth_weight", 0.5))
         rgb_weight = float(self.cfg.get("rgb_weight", 0.5))
@@ -730,7 +755,12 @@ class RGBDChipDetector:
         )
         return cv2.resize(pdf, (diff_mm.shape[1], diff_mm.shape[0]), interpolation=cv2.INTER_LINEAR)
 
-    def _rgb_pdf(self, rgb_bgr: np.ndarray, output_shape: tuple[int, int]) -> np.ndarray:
+    def _rgb_pdf(
+        self,
+        rgb_bgr: np.ndarray,
+        output_shape: tuple[int, int],
+        feature_allowed_mask: np.ndarray | None = None,
+    ) -> np.ndarray:
         _, FitRGB_SIFT = get_detector_classes()
         if rgb_bgr is None:
             self.last_rgb_sift_overlay = None
@@ -739,11 +769,41 @@ class RGBDChipDetector:
         fit_img = self._rgb_fit_image(rgb_bgr)
         rgb_gmm = FitRGB_SIFT(fit_img)
         current_keypoints = self._detect_rgb_keypoints(rgb_gmm)
-        retained_keypoints = self.filter_rgb_baseline_features(current_keypoints)
-        rejected_count = len(current_keypoints) - len(retained_keypoints)
+        depth_retained_keypoints = list(current_keypoints)
+        if feature_allowed_mask is not None:
+            allowed = np.asarray(feature_allowed_mask, dtype=bool)
+            if allowed.shape != tuple(output_shape):
+                raise ValueError(
+                    "RGB feature-allowed mask shape must match output shape: "
+                    f"mask={allowed.shape}, output={tuple(output_shape)}."
+                )
+            scale_x = output_shape[1] / fit_img.shape[1]
+            scale_y = output_shape[0] / fit_img.shape[0]
+            depth_retained_keypoints = []
+            for keypoint in current_keypoints:
+                x = int(round(float(keypoint.pt[0]) * scale_x))
+                y = int(round(float(keypoint.pt[1]) * scale_y))
+                if (
+                    0 <= x < output_shape[1]
+                    and 0 <= y < output_shape[0]
+                    and allowed[y, x]
+                ):
+                    depth_retained_keypoints.append(keypoint)
+
+        retained_keypoints = self.filter_rgb_baseline_features(
+            depth_retained_keypoints
+        )
+        depth_rejected_count = len(current_keypoints) - len(
+            depth_retained_keypoints
+        )
+        baseline_rejected_count = len(depth_retained_keypoints) - len(
+            retained_keypoints
+        )
         print(
             f"[detect] RGB SIFT features: baseline={len(self.rgb_baseline_feature_coords)}, "
-            f"current={len(current_keypoints)}, rejected={rejected_count}, "
+            f"current={len(current_keypoints)}, "
+            f"depth-rejected={depth_rejected_count}, "
+            f"baseline-rejected={baseline_rejected_count}, "
             f"retained={len(retained_keypoints)}."
         )
 
@@ -863,6 +923,7 @@ def sample_pixels_from_pdf(pdf: np.ndarray, sample_count: int, random_seed: int 
 
 def visualize_pdf_debug(
     rgb_bgr: np.ndarray,
+    baseline_depth_mm: np.ndarray,
     depth_diff_mm: np.ndarray,
     pdf: np.ndarray,
     depth_pdf: np.ndarray | None,
@@ -895,10 +956,32 @@ def visualize_pdf_debug(
     else:
         depth_abs_max = 1.0
 
+    if baseline_depth_mm is None:
+        baseline_depth_mm = np.zeros_like(pdf_norm, dtype=np.float32)
+    baseline_depth_mm = np.asarray(baseline_depth_mm, dtype=np.float32)
+    finite_baseline_depth = baseline_depth_mm[
+        np.isfinite(baseline_depth_mm) & (baseline_depth_mm > 0.0)
+    ]
+    if finite_baseline_depth.size:
+        baseline_vmin, baseline_vmax = np.percentile(
+            finite_baseline_depth, [1.0, 99.0]
+        )
+        if baseline_vmax <= baseline_vmin:
+            baseline_vmax = baseline_vmin + 1.0
+    else:
+        baseline_vmin, baseline_vmax = 0.0, 1.0
+
     fig, axes = plt.subplots(2, 4, figsize=(20, 9), constrained_layout=True)
     panels = [
         ("RGB image", rgb, None, None, None),
         ("Retained RGB SIFT features", rgb_sift_overlay, None, None, None),
+        (
+            "Baseline depth [mm]",
+            baseline_depth_mm,
+            "viridis",
+            baseline_vmin,
+            baseline_vmax,
+        ),
         ("Depth difference image", depth_diff_mm, "coolwarm", -depth_abs_max, depth_abs_max),
         ("Depth PDF", depth_pdf_norm, "turbo", 0.0, 1.0),
         ("RGB PDF", rgb_pdf_norm, "turbo", 0.0, 1.0),
@@ -924,7 +1007,13 @@ def visualize_pdf_debug(
                     path_effects=[],
                     bbox=dict(facecolor="black", alpha=0.55, edgecolor="none", pad=1.5),
                 )
-        if title in ("Depth difference image", "Depth PDF", "RGB PDF", "Merged PDF"):
+        if title in (
+            "Baseline depth [mm]",
+            "Depth difference image",
+            "Depth PDF",
+            "RGB PDF",
+            "Merged PDF",
+        ):
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     for ax in axes.flat[len(panels):]:
         ax.axis("off")

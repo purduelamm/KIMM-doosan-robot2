@@ -157,6 +157,7 @@ def main(args=None):
         if detector_cfg.get("show_pdf_overlay", True):
             visualize_pdf_debug(
                 current_rgb_bgr,
+                reference_depth,
                 detector.last_depth_diff_mm,
                 chip_pdf,
                 detector.last_depth_pdf,
