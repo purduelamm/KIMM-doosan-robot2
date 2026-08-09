@@ -101,7 +101,7 @@ mesh:
 
 path_actions:
   cone_sweep:
-    enabled: true
+    enabled: false
     angle_deg: 10.0
     samples: 8
 
@@ -162,6 +162,12 @@ chip_detector:
   frame_timeout_sec: 10.0
   reference_timeout_sec: 15.0
   current_timeout_sec: 15.0
+  baseline:
+    # capture: acquire and archive a new clean baseline
+    # load: use the exact archive selected by load_path
+    mode: load
+    save_directory: data/blow_from_mesh_baselines
+    load_path: data/blow_from_mesh_baselines/baseline_doosan_m0609_20260809T184516_603161Z.npz
   min_valid_mm: 10.0
   thresh_min_mm: 1.0
   thresh_max_mm: 50.0
@@ -202,7 +208,7 @@ execution:
   confirm_real_execution: true
   online_segment_settle_sec: 0.2
   continuous_spline:
-    velocity: 100.0
+    velocity: 200.0
     acceleration: 150.0
     # Doosan MAX_SPLINE_POINT is 100. The dense guide is sampled to this
     # count and submitted in one movesx request.

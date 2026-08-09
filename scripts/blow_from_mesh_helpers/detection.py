@@ -1,8 +1,11 @@
+import json
 import os
+import re
 import sys
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import cv2
 import matplotlib
@@ -60,6 +63,22 @@ from .ros_context import (
 
 _fit_depth_cls = None
 _fit_rgb_sift_cls = None
+BASELINE_SCHEMA_VERSION = 1
+
+
+def resolve_baseline_path(path: str) -> str:
+    """Resolve baseline paths relative to the scripts directory."""
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("Baseline path must be a non-empty string.")
+    expanded = os.path.expanduser(path.strip())
+    if not os.path.isabs(expanded):
+        expanded = os.path.join(SCRIPT_DIR, expanded)
+    return os.path.abspath(expanded)
+
+
+def _baseline_filename_token(value: object) -> str:
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value).strip())
+    return token.strip("-._") or "unknown"
 
 
 def get_detector_classes():
@@ -237,10 +256,292 @@ class RGBDChipDetector:
         self.last_rgb_sift_overlay = None
         self.rgb_baseline_feature_coords = np.empty((0, 2), dtype=np.float32)
         self.rgb_baseline_frame_count = 0
+        self.last_baseline_path = None
+        self.last_baseline_metadata = None
 
     def reset_rgb_baseline(self) -> None:
         self.rgb_baseline_feature_coords = np.empty((0, 2), dtype=np.float32)
         self.rgb_baseline_frame_count = 0
+
+    def _baseline_sift_settings(self) -> dict:
+        return {
+            "rgb_fit_scale": float(self.cfg.get("rgb_fit_scale", 0.5)),
+            "rgb_num_features": int(self.cfg.get("rgb_num_features", 0)),
+            "rgb_sift_contrast": float(
+                self.cfg.get("rgb_sift_contrast", 0.02)
+            ),
+            "rgb_sift_edge": float(self.cfg.get("rgb_sift_edge", 12)),
+        }
+
+    @staticmethod
+    def _next_baseline_archive_path(
+        directory: str,
+        robot_type: str,
+        robot_model: str,
+    ) -> tuple[str, str]:
+        created = datetime.now(timezone.utc)
+        created_utc = created.isoformat(timespec="microseconds").replace("+00:00", "Z")
+        timestamp = created.strftime("%Y%m%dT%H%M%S_%fZ")
+        stem = (
+            f"baseline_{_baseline_filename_token(robot_type)}_"
+            f"{_baseline_filename_token(robot_model)}_{timestamp}"
+        )
+        path = os.path.join(directory, f"{stem}.npz")
+        suffix = 1
+        while os.path.exists(path):
+            path = os.path.join(directory, f"{stem}_{suffix:02d}.npz")
+            suffix += 1
+        return path, created_utc
+
+    def save_baseline(
+        self,
+        reference_depth_mm: np.ndarray,
+        rgb_bgr: np.ndarray,
+        save_directory: str,
+        robot_type: str,
+        robot_model: str,
+    ) -> str:
+        """Atomically save averaged depth and RGB baseline feature coordinates."""
+        depth = np.asarray(reference_depth_mm, dtype=np.float32)
+        if depth.ndim != 2:
+            raise ValueError(
+                f"Baseline depth must be a 2-D image; got shape {depth.shape}."
+            )
+        if rgb_bgr is None or np.asarray(rgb_bgr).ndim != 3:
+            raise ValueError("A 3-D RGB image is required to save baseline metadata.")
+
+        coords = np.asarray(self.rgb_baseline_feature_coords, dtype=np.float32)
+        if coords.ndim != 2 or coords.shape[1] != 2:
+            raise ValueError(
+                "Baseline RGB feature coordinates must have shape (N, 2); "
+                f"got {coords.shape}."
+            )
+        if not np.all(np.isfinite(coords)):
+            raise ValueError("Baseline RGB feature coordinates must be finite.")
+        if self.rgb_baseline_frame_count < 0:
+            raise ValueError("Baseline RGB frame count must be non-negative.")
+
+        directory = resolve_baseline_path(save_directory)
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"[detect] Could not create baseline directory '{directory}': {exc}"
+            ) from exc
+
+        archive_path, created_utc = self._next_baseline_archive_path(
+            directory, robot_type, robot_model
+        )
+        rgb_shape = tuple(int(value) for value in np.asarray(rgb_bgr).shape[:2])
+        fit_shape = tuple(int(value) for value in self._rgb_fit_image(rgb_bgr).shape[:2])
+        metadata = {
+            "schema_version": BASELINE_SCHEMA_VERSION,
+            "created_utc": created_utc,
+            "depth_shape": list(depth.shape),
+            "rgb_shape": list(rgb_shape),
+            "rgb_fit_shape": list(fit_shape),
+            "sift_settings": self._baseline_sift_settings(),
+            "robot_type": str(robot_type),
+            "robot_model": str(robot_model),
+        }
+
+        temporary_path = None
+        try:
+            # Use a same-directory temporary archive so os.replace is atomic.
+            temporary_path = os.path.join(
+                directory,
+                f".{os.path.basename(archive_path)}.{os.getpid()}.tmp",
+            )
+            with open(temporary_path, "xb") as stream:
+                np.savez_compressed(
+                    stream,
+                    reference_depth_mm=depth,
+                    rgb_feature_coords=coords,
+                    rgb_baseline_frame_count=np.asarray(
+                        self.rgb_baseline_frame_count, dtype=np.int64
+                    ),
+                    metadata_json=np.asarray(json.dumps(metadata, sort_keys=True)),
+                )
+            os.replace(temporary_path, archive_path)
+        except (OSError, ValueError) as exc:
+            if temporary_path is not None:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    pass
+            raise RuntimeError(
+                f"[detect] Could not save baseline archive '{archive_path}': {exc}"
+            ) from exc
+
+        self.last_baseline_path = archive_path
+        self.last_baseline_metadata = metadata
+        print(
+            f"[detect] Saved baseline archive: {archive_path} "
+            f"(created={created_utc}, depth={depth.shape}, "
+            f"features={len(coords)}, RGB frames={self.rgb_baseline_frame_count})."
+        )
+        return archive_path
+
+    def load_baseline(
+        self,
+        load_path: str,
+        current_depth_mm: np.ndarray,
+        current_rgb_bgr: np.ndarray,
+        robot_type: str | None = None,
+        robot_model: str | None = None,
+    ) -> np.ndarray:
+        """Load and validate one explicitly selected baseline archive."""
+        archive_path = resolve_baseline_path(load_path)
+        if not os.path.isfile(archive_path):
+            raise RuntimeError(
+                f"[detect] Baseline archive does not exist: {archive_path}"
+            )
+
+        required_fields = {
+            "reference_depth_mm",
+            "rgb_feature_coords",
+            "rgb_baseline_frame_count",
+            "metadata_json",
+        }
+        try:
+            with np.load(archive_path, allow_pickle=False) as archive:
+                missing = required_fields.difference(archive.files)
+                if missing:
+                    raise ValueError(
+                        "missing field(s): " + ", ".join(sorted(missing))
+                    )
+                depth = np.asarray(archive["reference_depth_mm"])
+                coords = np.asarray(archive["rgb_feature_coords"])
+                frame_count_value = np.asarray(
+                    archive["rgb_baseline_frame_count"]
+                )
+                metadata_value = np.asarray(archive["metadata_json"])
+                if metadata_value.ndim != 0:
+                    raise ValueError("metadata_json must be a scalar string")
+                metadata = json.loads(str(metadata_value.item()))
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"[detect] Could not read baseline archive '{archive_path}': {exc}"
+            ) from exc
+
+        if not isinstance(metadata, dict):
+            raise RuntimeError(
+                f"[detect] Baseline archive '{archive_path}' metadata must be an object."
+            )
+        schema_version = metadata.get("schema_version")
+        if type(schema_version) is not int or schema_version != BASELINE_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"[detect] Baseline archive '{archive_path}' uses schema "
+                f"{schema_version!r}; expected {BASELINE_SCHEMA_VERSION}."
+            )
+        if depth.ndim != 2 or not np.issubdtype(depth.dtype, np.number):
+            raise RuntimeError(
+                f"[detect] Baseline depth in '{archive_path}' must be a numeric "
+                f"2-D array; got shape={depth.shape}, dtype={depth.dtype}."
+            )
+        if coords.ndim != 2 or coords.shape[1] != 2 or not np.issubdtype(
+            coords.dtype, np.number
+        ):
+            raise RuntimeError(
+                f"[detect] Baseline features in '{archive_path}' must be a numeric "
+                f"(N, 2) array; got shape={coords.shape}, dtype={coords.dtype}."
+            )
+        if not np.all(np.isfinite(coords)):
+            raise RuntimeError(
+                f"[detect] Baseline features in '{archive_path}' contain non-finite values."
+            )
+        if frame_count_value.ndim != 0 or not np.issubdtype(
+            frame_count_value.dtype, np.integer
+        ):
+            raise RuntimeError(
+                f"[detect] Baseline RGB frame count in '{archive_path}' must be an integer."
+            )
+        frame_count = int(frame_count_value.item())
+        if frame_count < 0:
+            raise RuntimeError(
+                f"[detect] Baseline RGB frame count in '{archive_path}' is negative."
+            )
+
+        def stored_shape(name: str) -> tuple[int, int]:
+            value = metadata.get(name)
+            if (
+                not isinstance(value, list)
+                or len(value) != 2
+                or any(type(dimension) is not int or dimension <= 0 for dimension in value)
+            ):
+                raise RuntimeError(
+                    f"[detect] Baseline archive '{archive_path}' metadata field "
+                    f"'{name}' must contain two positive integers; got {value!r}."
+                )
+            return tuple(value)
+
+        current_depth_shape = tuple(int(value) for value in current_depth_mm.shape)
+        current_rgb_shape = tuple(int(value) for value in current_rgb_bgr.shape[:2])
+        current_fit_shape = tuple(
+            int(value) for value in self._rgb_fit_image(current_rgb_bgr).shape[:2]
+        )
+        stored_depth_shape = stored_shape("depth_shape")
+        stored_rgb_shape = stored_shape("rgb_shape")
+        stored_fit_shape = stored_shape("rgb_fit_shape")
+        if tuple(depth.shape) != stored_depth_shape:
+            raise RuntimeError(
+                f"[detect] Baseline archive '{archive_path}' has inconsistent depth "
+                f"metadata: array={depth.shape}, metadata={stored_depth_shape}."
+            )
+        shape_mismatches = []
+        if stored_depth_shape != current_depth_shape:
+            shape_mismatches.append(
+                f"depth stored={stored_depth_shape} current={current_depth_shape}"
+            )
+        if stored_rgb_shape != current_rgb_shape:
+            shape_mismatches.append(
+                f"RGB stored={stored_rgb_shape} current={current_rgb_shape}"
+            )
+        if stored_fit_shape != current_fit_shape:
+            shape_mismatches.append(
+                f"RGB fit stored={stored_fit_shape} current={current_fit_shape}"
+            )
+        if shape_mismatches:
+            raise RuntimeError(
+                f"[detect] Baseline archive '{archive_path}' frame dimensions are "
+                "incompatible: " + "; ".join(shape_mismatches)
+            )
+
+        stored_settings = metadata.get("sift_settings")
+        current_settings = self._baseline_sift_settings()
+        if stored_settings != current_settings:
+            raise RuntimeError(
+                f"[detect] Baseline archive '{archive_path}' SIFT settings are "
+                f"incompatible: stored={stored_settings}, current={current_settings}."
+            )
+
+        expected_profile = {
+            "robot_type": None if robot_type is None else str(robot_type),
+            "robot_model": None if robot_model is None else str(robot_model),
+        }
+        profile_mismatches = [
+            f"{name} stored={metadata.get(name)!r} current={expected!r}"
+            for name, expected in expected_profile.items()
+            if expected is not None and metadata.get(name) != expected
+        ]
+        if profile_mismatches:
+            raise RuntimeError(
+                f"[detect] Baseline archive '{archive_path}' robot profile is "
+                "incompatible: " + "; ".join(profile_mismatches)
+            )
+
+        self.rgb_baseline_feature_coords = coords.astype(np.float32, copy=True)
+        self.rgb_baseline_frame_count = frame_count
+        self.last_baseline_path = archive_path
+        self.last_baseline_metadata = metadata
+        reference_depth = depth.astype(np.float32, copy=True)
+        print(
+            f"[detect] Loaded baseline archive: {archive_path} "
+            f"(created={metadata.get('created_utc', 'unknown')}, "
+            f"depth={reference_depth.shape}, features={len(coords)}, "
+            f"RGB frames={frame_count})."
+        )
+        return reference_depth
 
     def _rgb_fit_image(self, rgb_bgr: np.ndarray) -> np.ndarray:
         scale = float(self.cfg.get("rgb_fit_scale", 0.5))
@@ -485,6 +786,61 @@ class RGBDChipDetector:
             interpolation=cv2.INTER_LINEAR,
         )
         return normalize_pdf(saliency)
+
+
+def prepare_detection_baseline(
+    detector: RGBDChipDetector,
+    rgbd: RGBDFrameGrabber,
+    detector_cfg: dict,
+    initial_rgb_bgr: np.ndarray,
+    initial_depth_mm: np.ndarray,
+    robot_type: str,
+    robot_model: str,
+) -> np.ndarray:
+    """Capture-and-save or explicitly load the clean detection baseline."""
+    baseline_cfg = detector_cfg.get("baseline", {})
+    mode = str(baseline_cfg.get("mode", "capture")).strip().lower()
+
+    if mode == "capture":
+        detector.reset_rgb_baseline()
+        reference_depth = rgbd.average_depth(
+            frames_to_average=int(detector_cfg.get("frames_to_average", 30)),
+            timeout_sec=float(detector_cfg.get("reference_timeout_sec", 15.0)),
+            rgb_frame_callback=detector.add_rgb_baseline_frame,
+        )
+        baseline_rgb = rgbd.latest_rgb_bgr
+        if baseline_rgb is None:
+            baseline_rgb = initial_rgb_bgr
+        save_directory = baseline_cfg.get(
+            "save_directory", "data/blow_from_mesh_baselines"
+        )
+        detector.save_baseline(
+            reference_depth,
+            baseline_rgb,
+            save_directory=save_directory,
+            robot_type=robot_type,
+            robot_model=robot_model,
+        )
+        return reference_depth
+
+    if mode == "load":
+        load_path = baseline_cfg.get("load_path")
+        if not isinstance(load_path, str) or not load_path.strip():
+            raise RuntimeError(
+                "[detect] chip_detector.baseline.load_path must name an archive "
+                "when baseline.mode is 'load'."
+            )
+        return detector.load_baseline(
+            load_path,
+            current_depth_mm=initial_depth_mm,
+            current_rgb_bgr=initial_rgb_bgr,
+            robot_type=robot_type,
+            robot_model=robot_model,
+        )
+
+    raise ValueError(
+        f"Unsupported chip_detector.baseline.mode '{mode}'. Use capture or load."
+    )
 
 
 def sample_pixels_from_pdf(pdf: np.ndarray, sample_count: int, random_seed: int | None = None) -> list[tuple[float, float]]:

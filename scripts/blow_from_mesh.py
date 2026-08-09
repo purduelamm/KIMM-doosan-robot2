@@ -16,6 +16,8 @@ from blow_from_mesh_helpers.config import (
     INIT_TARGET,
     MESH_DIMENSION,
     QUERY_PIXELS,
+    ROBOT_MODEL,
+    ROBOT_TYPE,
     WLD_TO_BASE_R,
     WLD_TO_BASE_T,
     WLD_TO_CNC_R,
@@ -25,6 +27,7 @@ from blow_from_mesh_helpers.detection import (
     RGBDChipDetector,
     RGBDFrameGrabber,
     grab_image,
+    prepare_detection_baseline,
     sample_pixels_from_pdf,
     visualize_pdf_debug,
 )
@@ -94,6 +97,8 @@ def main(args=None):
 
     rgbd = None
     detector = None
+    initial_rgb_bgr = None
+    initial_depth_mm = None
     if detector_cfg.get("enabled", False):
         detector = RGBDChipDetector(detector_cfg)
         rgbd = RGBDFrameGrabber(
@@ -101,20 +106,30 @@ def main(args=None):
             CAMERA_CFG["depth_topic"],
             depth_unit=CAMERA_CFG.get("depth_unit", "auto"),
         )
-        rgbd.wait_for_frames(timeout_sec=float(detector_cfg.get("frame_timeout_sec", 10.0)))
+        initial_rgb_bgr, initial_depth_mm = rgbd.wait_for_frames(
+            timeout_sec=float(detector_cfg.get("frame_timeout_sec", 10.0))
+        )
 
     if detector_cfg.get("enabled", False):
-        if rgbd is None or detector is None:
+        if (
+            rgbd is None
+            or detector is None
+            or initial_rgb_bgr is None
+            or initial_depth_mm is None
+        ):
             raise RuntimeError("[detect] RGB-D detector was not initialized.")
 
-        detector.reset_rgb_baseline()
-        reference_depth = rgbd.average_depth(
-            frames_to_average=int(detector_cfg.get("frames_to_average", 30)),
-            timeout_sec=float(detector_cfg.get("reference_timeout_sec", 15.0)),
-            rgb_frame_callback=detector.add_rgb_baseline_frame,
+        reference_depth = prepare_detection_baseline(
+            detector,
+            rgbd,
+            detector_cfg,
+            initial_rgb_bgr,
+            initial_depth_mm,
+            robot_type=ROBOT_TYPE,
+            robot_model=ROBOT_MODEL,
         )
         print(
-            "[detect] Saved reference depth and "
+            "[detect] Baseline ready with "
             f"{len(detector.rgb_baseline_feature_coords)} baseline RGB feature(s) "
             f"from {detector.rgb_baseline_frame_count} frame(s)."
         )
