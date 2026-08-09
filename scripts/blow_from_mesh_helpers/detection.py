@@ -143,6 +143,7 @@ class RGBDFrameGrabber:
         self.latest_depth_mm = None
         self._depth_samples = []
         self._collect_depth = False
+        self._rgb_frame_callback = None
         self.rgb_sub = node.create_subscription(Image, rgb_topic, self._rgb_cb, 10)
         self.depth_sub = node.create_subscription(Image, depth_topic, self._depth_cb, 10)
         print(f"[rgbd] Subscribed RGB topic: {rgb_topic}")
@@ -150,6 +151,8 @@ class RGBDFrameGrabber:
 
     def _rgb_cb(self, msg):
         self.latest_rgb_bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        if self._rgb_frame_callback is not None:
+            self._rgb_frame_callback(self.latest_rgb_bgr.copy())
 
     def _depth_cb(self, msg):
         depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
@@ -167,21 +170,31 @@ class RGBDFrameGrabber:
                 raise RuntimeError("[rgbd] Timed out waiting for RGB-D frames.")
         return self.latest_rgb_bgr.copy(), self.latest_depth_mm.copy()
 
-    def average_depth(self, frames_to_average: int, timeout_sec: float = 10.0) -> np.ndarray:
+    def average_depth(
+        self,
+        frames_to_average: int,
+        timeout_sec: float = 10.0,
+        rgb_frame_callback=None,
+    ) -> np.ndarray:
         frames_to_average = max(1, int(frames_to_average))
         self._depth_samples = []
+        self._rgb_frame_callback = rgb_frame_callback
         self._collect_depth = True
         print(f"[rgbd] Collecting {frames_to_average} depth frame(s) for average...")
-        t0 = time.time()
-        while len(self._depth_samples) < frames_to_average:
-            rclpy.spin_once(node, timeout_sec=0.1)
-            if time.time() - t0 > timeout_sec:
-                self._collect_depth = False
-                raise RuntimeError(
-                    f"[rgbd] Timed out after collecting "
-                    f"{len(self._depth_samples)}/{frames_to_average} depth frames."
-                )
-        self._collect_depth = False
+        if rgb_frame_callback is not None and self.latest_rgb_bgr is not None:
+            rgb_frame_callback(self.latest_rgb_bgr.copy())
+        try:
+            t0 = time.time()
+            while len(self._depth_samples) < frames_to_average:
+                rclpy.spin_once(node, timeout_sec=0.1)
+                if time.time() - t0 > timeout_sec:
+                    raise RuntimeError(
+                        f"[rgbd] Timed out after collecting "
+                        f"{len(self._depth_samples)}/{frames_to_average} depth frames."
+                    )
+        finally:
+            self._collect_depth = False
+            self._rgb_frame_callback = None
         stacked = np.stack(self._depth_samples[:frames_to_average], axis=0)
         averaged = np.nanmean(stacked, axis=0).astype(np.float32)
         print(
@@ -221,6 +234,98 @@ class RGBDChipDetector:
         self.last_depth_diff_mm = None
         self.last_depth_pdf = None
         self.last_rgb_pdf = None
+        self.last_rgb_sift_overlay = None
+        self.rgb_baseline_feature_coords = np.empty((0, 2), dtype=np.float32)
+        self.rgb_baseline_frame_count = 0
+
+    def reset_rgb_baseline(self) -> None:
+        self.rgb_baseline_feature_coords = np.empty((0, 2), dtype=np.float32)
+        self.rgb_baseline_frame_count = 0
+
+    def _rgb_fit_image(self, rgb_bgr: np.ndarray) -> np.ndarray:
+        scale = float(self.cfg.get("rgb_fit_scale", 0.5))
+        if scale <= 0.0:
+            raise ValueError("chip_detector.rgb_fit_scale must be greater than zero.")
+        if scale == 1.0:
+            return rgb_bgr
+        return cv2.resize(
+            rgb_bgr,
+            (0, 0),
+            fx=scale,
+            fy=scale,
+            interpolation=cv2.INTER_LINEAR,
+        )
+
+    def _detect_rgb_keypoints(self, rgb_gmm):
+        return rgb_gmm._sift_detector(
+            int(self.cfg.get("rgb_num_features", 0)),
+            float(self.cfg.get("rgb_sift_contrast", 0.02)),
+            float(self.cfg.get("rgb_sift_edge", 12)),
+        )
+
+    @staticmethod
+    def keypoints_to_coords(keypoints) -> np.ndarray:
+        if not keypoints:
+            return np.empty((0, 2), dtype=np.float32)
+        return np.asarray([keypoint.pt for keypoint in keypoints], dtype=np.float32)
+
+    def add_rgb_baseline_frame(self, rgb_bgr: np.ndarray) -> None:
+        if rgb_bgr is None:
+            return
+        _, FitRGB_SIFT = get_detector_classes()
+        fit_img = self._rgb_fit_image(rgb_bgr)
+        keypoints = self._detect_rgb_keypoints(FitRGB_SIFT(fit_img))
+        coords = self.keypoints_to_coords(keypoints)
+        if coords.size:
+            self.rgb_baseline_feature_coords = np.vstack(
+                [self.rgb_baseline_feature_coords, coords]
+            )
+        self.rgb_baseline_frame_count += 1
+        print(
+            f"[detect] Baseline RGB frame {self.rgb_baseline_frame_count}: "
+            f"found {len(coords)} SIFT feature(s), "
+            f"stored {len(self.rgb_baseline_feature_coords)} total."
+        )
+
+    def filter_rgb_baseline_features(self, keypoints):
+        if not keypoints or self.rgb_baseline_feature_coords.size == 0:
+            return list(keypoints) if keypoints else []
+
+        coords = self.keypoints_to_coords(keypoints)
+        baseline = self.rgb_baseline_feature_coords
+        radius = float(self.cfg.get("rgb_ignore_feature_radius", 6.0))
+        if radius < 0.0:
+            raise ValueError(
+                "chip_detector.rgb_ignore_feature_radius must be non-negative."
+            )
+        radius_sq = radius * radius
+        keep_mask = np.ones(len(coords), dtype=bool)
+        for start in range(0, len(coords), 128):
+            stop = min(start + 128, len(coords))
+            chunk = coords[start:stop]
+            delta = chunk[:, None, :] - baseline[None, :, :]
+            dist_sq = np.sum(delta * delta, axis=2)
+            keep_mask[start:stop] = np.min(dist_sq, axis=1) > radius_sq
+        return [keypoint for keypoint, keep in zip(keypoints, keep_mask) if keep]
+
+    @staticmethod
+    def draw_sift_overlay(
+        rgb_bgr: np.ndarray,
+        keypoint_coords: np.ndarray | None,
+        scale_x: float = 1.0,
+        scale_y: float = 1.0,
+    ) -> np.ndarray:
+        overlay = rgb_bgr.copy()
+        if keypoint_coords is None:
+            return overlay
+        height, width = overlay.shape[:2]
+        for x, y in keypoint_coords:
+            cx = int(round(float(x) * scale_x))
+            cy = int(round(float(y) * scale_y))
+            if 0 <= cx < width and 0 <= cy < height:
+                cv2.circle(overlay, (cx, cy), 4, (0, 255, 0), 1, cv2.LINE_AA)
+                cv2.circle(overlay, (cx, cy), 1, (0, 0, 255), -1, cv2.LINE_AA)
+        return overlay
 
     def detect(
         self,
@@ -327,23 +432,34 @@ class RGBDChipDetector:
     def _rgb_pdf(self, rgb_bgr: np.ndarray, output_shape: tuple[int, int]) -> np.ndarray:
         _, FitRGB_SIFT = get_detector_classes()
         if rgb_bgr is None:
+            self.last_rgb_sift_overlay = None
             return np.zeros(output_shape, dtype=np.float32)
 
-        scale = float(self.cfg.get("rgb_fit_scale", 0.5))
-        if scale != 1.0:
-            fit_img = cv2.resize(rgb_bgr, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
-        else:
-            fit_img = rgb_bgr
-
+        fit_img = self._rgb_fit_image(rgb_bgr)
         rgb_gmm = FitRGB_SIFT(fit_img)
-        gmm = rgb_gmm.fit_rgb(
-            num_features=int(self.cfg.get("rgb_num_features", 500)),
-            sift_contrast=float(self.cfg.get("rgb_sift_contrast", 0.06)),
-            sift_edge=float(self.cfg.get("rgb_sift_edge", 6)),
+        current_keypoints = self._detect_rgb_keypoints(rgb_gmm)
+        retained_keypoints = self.filter_rgb_baseline_features(current_keypoints)
+        rejected_count = len(current_keypoints) - len(retained_keypoints)
+        print(
+            f"[detect] RGB SIFT features: baseline={len(self.rgb_baseline_feature_coords)}, "
+            f"current={len(current_keypoints)}, rejected={rejected_count}, "
+            f"retained={len(retained_keypoints)}."
+        )
+
+        rgb_gmm.gmm, rgb_gmm.keypoint_coords = rgb_gmm._fit_gmm(
+            retained_keypoints,
             n_components=int(self.cfg.get("rgb_n_components", 5)),
         )
-        if gmm is None:
-            print("[detect] RGB SIFT found no keypoints; using depth PDF only.")
+        scale_x = rgb_bgr.shape[1] / fit_img.shape[1]
+        scale_y = rgb_bgr.shape[0] / fit_img.shape[0]
+        self.last_rgb_sift_overlay = self.draw_sift_overlay(
+            rgb_bgr,
+            rgb_gmm.keypoint_coords,
+            scale_x,
+            scale_y,
+        )
+        if rgb_gmm.gmm is None:
+            print("[detect] No RGB SIFT features remain; using depth PDF only.")
             return np.zeros(output_shape, dtype=np.float32)
 
         pdf = rgb_gmm.rgb_gmm_to_pdf(
@@ -396,9 +512,14 @@ def visualize_pdf_debug(
     depth_pdf: np.ndarray | None,
     rgb_pdf: np.ndarray | None,
     sampled_points: list[tuple[float, float]],
+    rgb_sift_overlay_bgr: np.ndarray | None = None,
     alpha: float = 0.55,
 ) -> None:
     rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
+    if rgb_sift_overlay_bgr is None:
+        rgb_sift_overlay = rgb.copy()
+    else:
+        rgb_sift_overlay = cv2.cvtColor(rgb_sift_overlay_bgr, cv2.COLOR_BGR2RGB)
     pdf_norm = normalize_pdf(pdf)
     depth_pdf_norm = normalize_pdf(depth_pdf) if depth_pdf is not None else np.zeros_like(pdf_norm)
     rgb_pdf_norm = normalize_pdf(rgb_pdf) if rgb_pdf is not None else np.zeros_like(pdf_norm)
@@ -418,9 +539,10 @@ def visualize_pdf_debug(
     else:
         depth_abs_max = 1.0
 
-    fig, axes = plt.subplots(2, 3, figsize=(16, 9), constrained_layout=True)
+    fig, axes = plt.subplots(2, 4, figsize=(20, 9), constrained_layout=True)
     panels = [
         ("RGB image", rgb, None, None, None),
+        ("Retained RGB SIFT features", rgb_sift_overlay, None, None, None),
         ("Depth difference image", depth_diff_mm, "coolwarm", -depth_abs_max, depth_abs_max),
         ("Depth PDF", depth_pdf_norm, "turbo", 0.0, 1.0),
         ("RGB PDF", rgb_pdf_norm, "turbo", 0.0, 1.0),
@@ -448,6 +570,8 @@ def visualize_pdf_debug(
                 )
         if title in ("Depth difference image", "Depth PDF", "RGB PDF", "Merged PDF"):
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    for ax in axes.flat[len(panels):]:
+        ax.axis("off")
 
     if matplotlib.get_backend().lower() == "agg":
         out_path = os.path.join("/tmp", "chip_pdf_debug.png")

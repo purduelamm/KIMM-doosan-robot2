@@ -161,13 +161,16 @@ chip_detector:
   depth_fit_scale: 0.5
   depth_pdf_downsample_factor: 1
   rgb_fit_scale: 0.5
-  rgb_num_features: 500
-  rgb_sift_contrast: 0.06
-  rgb_sift_edge: 6
+  rgb_num_features: 0
+  rgb_sift_contrast: 0.02
+  rgb_sift_edge: 12
   rgb_n_components: 5
-  rgb_include_outliers: false
+  rgb_include_outliers: true
   rgb_outlier_radius: 15
   rgb_outlier_probability: 0.8
+  # Radius in pixels of the rgb_fit_scale image. Current SIFT features this
+  # close to a clean-reference feature are rejected before RGB GMM fitting.
+  rgb_ignore_feature_radius: 6.0
   rgb_pdf_downsample_factor: 1
   depth_weight: 0.5
   rgb_weight: 0.5

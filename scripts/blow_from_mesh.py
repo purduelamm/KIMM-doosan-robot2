@@ -93,7 +93,9 @@ def main(args=None):
     time.sleep(3)
 
     rgbd = None
+    detector = None
     if detector_cfg.get("enabled", False):
+        detector = RGBDChipDetector(detector_cfg)
         rgbd = RGBDFrameGrabber(
             CAMERA_CFG["rgb_topic"],
             CAMERA_CFG["depth_topic"],
@@ -102,14 +104,20 @@ def main(args=None):
         rgbd.wait_for_frames(timeout_sec=float(detector_cfg.get("frame_timeout_sec", 10.0)))
 
     if detector_cfg.get("enabled", False):
-        if rgbd is None:
-            raise RuntimeError("[detect] RGB-D frame grabber was not initialized.")
+        if rgbd is None or detector is None:
+            raise RuntimeError("[detect] RGB-D detector was not initialized.")
 
+        detector.reset_rgb_baseline()
         reference_depth = rgbd.average_depth(
             frames_to_average=int(detector_cfg.get("frames_to_average", 30)),
             timeout_sec=float(detector_cfg.get("reference_timeout_sec", 15.0)),
+            rgb_frame_callback=detector.add_rgb_baseline_frame,
         )
-        print("[detect] Saved reference depth image at initial pose.")
+        print(
+            "[detect] Saved reference depth and "
+            f"{len(detector.rgb_baseline_feature_coords)} baseline RGB feature(s) "
+            f"from {detector.rgb_baseline_frame_count} frame(s)."
+        )
 
         motion_backend.move_to_joints(DETECTION_STAGING_TARGET)
         input("[detect] Robot is at detection staging pose. Prepare chips, then press Enter to detect...")
@@ -125,7 +133,6 @@ def main(args=None):
             timeout_sec=float(detector_cfg.get("current_timeout_sec", 15.0)),
         )
 
-        detector = RGBDChipDetector(detector_cfg)
         chip_pdf = detector.detect(reference_depth, current_depth, current_rgb_bgr)
         query_pixels = sample_pixels_from_pdf(
             chip_pdf,
@@ -140,6 +147,7 @@ def main(args=None):
                 detector.last_depth_pdf,
                 detector.last_rgb_pdf,
                 query_pixels,
+                rgb_sift_overlay_bgr=detector.last_rgb_sift_overlay,
                 alpha=float(detector_cfg.get("pdf_overlay_alpha", 0.55)),
             )
         T_w_cm = get_current_camera_transform(T_w_b)

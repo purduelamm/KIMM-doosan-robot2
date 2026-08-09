@@ -79,9 +79,9 @@ mesh:
     # degrees: false
     # translation: [-0.621294, 0.985948, 0.598539]
   world_to_cnc:
-    euler_xyz: [0.001910, 0.022992, -0.051017]
+    euler_xyz: [-0.014909, 0.009930, -0.105385]
     degrees: false
-    translation: [-0.670924, 0.907457, 0.599334]
+    translation: [-0.687306, 0.888490, 0.600276]
   # Offset from Vice.obj's native origin to its bottom-center CNC frame, in metres.
   # This matches VICE_MESH_LOCAL_OFFSET in chip_blowing_gazebo.launch.py.
   mesh_local_offset_m: [-1.591830368, -0.005995712, -0.432000008]
@@ -97,7 +97,7 @@ mesh:
   pose_mode: fixed_blower_z_axis
   fixed_blower_z_axis:
     angle_from_world_y_deg: 90.0
-    distance_m: 0.3
+    distance_m: 0.35
 
 path_actions:
   cone_sweep:
@@ -171,20 +171,23 @@ chip_detector:
   depth_fit_scale: 0.5
   depth_pdf_downsample_factor: 1
   rgb_fit_scale: 0.5
-  rgb_num_features: 500
-  rgb_sift_contrast: 0.06
-  rgb_sift_edge: 6
+  rgb_num_features: 0
+  rgb_sift_contrast: 0.02
+  rgb_sift_edge: 12
   rgb_n_components: 5
-  rgb_include_outliers: false
+  rgb_include_outliers: true
   rgb_outlier_radius: 15
   rgb_outlier_probability: 0.8
+  # Radius in pixels of the rgb_fit_scale image. Current SIFT features this
+  # close to a clean-reference feature are rejected before RGB GMM fitting.
+  rgb_ignore_feature_radius: 6.0
   rgb_pdf_downsample_factor: 1
   depth_weight: 0.5
   rgb_weight: 0.5
   rgb_only_outside_depth: true
   rgb_saliency_fallback_outside_depth: true
   require_valid_depth_for_pdf: false
-  sample_count: 20
+  sample_count: 10
   sample_random_seed: 1
   show_pdf_overlay: true
   pdf_overlay_alpha: 0.55
@@ -199,8 +202,8 @@ execution:
   confirm_real_execution: true
   online_segment_settle_sec: 0.2
   continuous_spline:
-    velocity: 50.0
-    acceleration: 50.0
+    velocity: 100.0
+    acceleration: 150.0
     # Doosan MAX_SPLINE_POINT is 100. The dense guide is sampled to this
     # count and submitted in one movesx request.
     max_waypoints: 100
