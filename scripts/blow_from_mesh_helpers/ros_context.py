@@ -40,6 +40,7 @@ movej = _DSRFunctionProxy("movej")
 posj = _DSRFunctionProxy("posj")
 movel = _DSRFunctionProxy("movel")
 movesx = _DSRFunctionProxy("movesx")
+mwait = _DSRFunctionProxy("mwait")
 posx = _DSRFunctionProxy("posx")
 set_robot_mode = _DSRFunctionProxy("set_robot_mode")
 get_current_posx = _DSRFunctionProxy("get_current_posx")
@@ -100,6 +101,7 @@ def init_ros():
             movej as _movej,
             movel as _movel,
             movesx as _movesx,
+            mwait as _mwait,
             posj as _posj,
             posx as _posx,
             set_robot_mode as _set_robot_mode,
@@ -111,6 +113,7 @@ def init_ros():
                 "posj": _posj,
                 "movel": _movel,
                 "movesx": _movesx,
+                "mwait": _mwait,
                 "posx": _posx,
                 "set_robot_mode": _set_robot_mode,
                 "get_current_posx": _get_current_posx,

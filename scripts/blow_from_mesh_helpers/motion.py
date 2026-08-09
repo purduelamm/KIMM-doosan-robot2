@@ -55,6 +55,7 @@ from .ros_context import (
     movej,
     movel,
     movesx,
+    mwait,
     node,
     posj,
     posx,
@@ -347,6 +348,18 @@ class DoosanDirectMotionBackend(MotionBackend):
         result = movesx(spline_targets, vel=vel, acc=acc)
         if result != 0:
             raise RuntimeError(f"[exec] Doosan spline command failed with code {result}.")
+
+        # The ROS2 service response only confirms that DRFL accepted the
+        # command on some controller/driver versions.  It can return before
+        # the physical spline has finished even though movesx was requested
+        # with sync_type=0.  Keep the caller (and therefore the airgun) active
+        # until the controller motion queue is actually complete.
+        print("[exec] Spline accepted; waiting for controller motion completion...")
+        wait_result = mwait()
+        if wait_result != 0:
+            raise RuntimeError(
+                f"[exec] Doosan motion wait failed with code {wait_result}."
+            )
         print("[exec] Continuous Doosan spline complete.")
 
     def move_to_joints(self, joints_or_target) -> None:
