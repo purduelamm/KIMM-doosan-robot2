@@ -102,9 +102,9 @@ mesh:
 
 path_actions:
   cone_sweep:
-    enabled: false
+    enabled: true
     angle_deg: 10.0
-    samples: 8
+    samples: 4
 
 moveit:
   group: manipulator
@@ -166,9 +166,9 @@ chip_detector:
   baseline:
     # capture: acquire and archive a new clean baseline
     # load: use the exact archive selected by load_path
-    mode: capture
+    mode: load
     save_directory: data/blow_from_mesh_baselines
-    load_path: data/blow_from_mesh_baselines/baseline_doosan_m0609_20260809T195443_133925Z.npz
+    load_path: data/blow_from_mesh_baselines/baseline_doosan_m0609_20260809T202503_028332Z.npz
   min_valid_mm: 10.0
   # Depth difference is forced to zero where clean baseline depth exceeds this.
   baseline_depth_max_mm: 1000.0
@@ -185,18 +185,18 @@ chip_detector:
   rgb_sift_edge: 12
   rgb_n_components: 5
   rgb_include_outliers: true
-  rgb_outlier_radius: 15
-  rgb_outlier_probability: 0.8
+  rgb_outlier_radius: 5
+  rgb_outlier_probability: 0.4
   # Radius in pixels of the rgb_fit_scale image. Current SIFT features this
   # close to a clean-reference feature are rejected before RGB GMM fitting.
   rgb_ignore_feature_radius: 6.0
   rgb_pdf_downsample_factor: 1
-  depth_weight: 0.5
-  rgb_weight: 0.5
+  depth_weight: 0.2
+  rgb_weight: 0.8
   rgb_only_outside_depth: true
   rgb_saliency_fallback_outside_depth: true
   require_valid_depth_for_pdf: false
-  sample_count: 10
+  sample_count: 20
   sample_random_seed: 1
   show_pdf_overlay: true
   pdf_overlay_alpha: 0.55
@@ -211,7 +211,7 @@ execution:
   confirm_real_execution: true
   online_segment_settle_sec: 0.2
   continuous_spline:
-    velocity: 200.0
+    velocity: 300.0
     acceleration: 150.0
     # Doosan MAX_SPLINE_POINT is 100. The dense guide is sampled to this
     # count and submitted in one movesx request.
