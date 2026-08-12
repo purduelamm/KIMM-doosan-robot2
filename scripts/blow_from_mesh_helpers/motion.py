@@ -13,7 +13,7 @@ import tf2_ros
 import trimesh
 from action_msgs.msg import GoalStatus
 from cv_bridge import CvBridge
-from geometry_msgs.msg import Point, Pose, Quaternion
+from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import (
     AllowedCollisionEntry,
@@ -28,11 +28,10 @@ from moveit_msgs.msg import (
     PositionConstraint,
     RobotState,
 )
-from moveit_msgs.srv import ApplyPlanningScene, GetMotionPlan
+from moveit_msgs.srv import ApplyPlanningScene, GetMotionPlan, GetPositionIK
 from PIL import Image as PILImage
 from PIL import ImageTk
 from rclpy.action import ActionClient
-from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial.transform import Slerp
 from sensor_msgs.msg import CompressedImage, Image
@@ -61,6 +60,34 @@ from .ros_context import (
     posx,
     set_robot_mode,
 )
+
+MOVEIT_ERROR_NAMES = {
+    1: "SUCCESS",
+    0: "UNDEFINED",
+    -1: "PLANNING_FAILED",
+    -2: "INVALID_MOTION_PLAN",
+    -4: "CONTROL_FAILED",
+    -6: "TIMED_OUT",
+    -10: "START_STATE_IN_COLLISION",
+    -11: "START_STATE_VIOLATES_PATH_CONSTRAINTS",
+    -12: "GOAL_IN_COLLISION",
+    -13: "GOAL_VIOLATES_PATH_CONSTRAINTS",
+    -14: "GOAL_CONSTRAINTS_VIOLATED",
+    -15: "INVALID_GROUP_NAME",
+    -16: "INVALID_GOAL_CONSTRAINTS",
+    -17: "INVALID_ROBOT_STATE",
+    -18: "INVALID_LINK_NAME",
+    -21: "FRAME_TRANSFORM_FAILURE",
+    -22: "COLLISION_CHECKING_UNAVAILABLE",
+    -23: "ROBOT_STATE_STALE",
+    -25: "COMMUNICATION_FAILURE",
+    -26: "START_STATE_INVALID",
+    -27: "GOAL_STATE_INVALID",
+    -29: "CRASH",
+    -30: "ABORT",
+    -31: "NO_IK_SOLUTION",
+    99999: "FAILURE",
+}
 
 def doosan_posx_to_base_se3(doosan_pose: list[float]) -> np.ndarray:
     T = np.eye(4)
@@ -115,6 +142,29 @@ def format_doosan_task_rate(
             f"{value[1]:g} {angular_unit}]"
         )
     return f"{value:g} {linear_unit}"
+
+
+def get_current_doosan_pose_safely(context: str):
+    """Read the diagnostic TCP pose without making successful motion fail."""
+    try:
+        feedback = get_current_posx()
+    except Exception as exc:
+        print(
+            f"[{context}] WARNING: current Doosan TCP pose is temporarily "
+            f"unavailable ({type(exc).__name__}: {exc})."
+        )
+        return None
+    if not isinstance(feedback, tuple) or len(feedback) != 2:
+        print(
+            f"[{context}] WARNING: current Doosan TCP pose returned malformed "
+            "feedback."
+        )
+        return None
+    pose, solution_space = feedback
+    if pose is None:
+        print(f"[{context}] WARNING: current Doosan TCP pose is unavailable.")
+        return None
+    return pose, solution_space
 
 
 def typed_target_to_base_se3(target: dict, T_w_b: np.ndarray | None = None) -> np.ndarray:
@@ -316,7 +366,9 @@ class MoveItMotionBackend(MotionBackend):
                 time.sleep(1)
                 print("[init] Moved to initial point.")
                 if is_doosan_robot():
-                    print("current: ", get_current_posx())
+                    current_feedback = get_current_doosan_pose_safely("init")
+                    if current_feedback is not None:
+                        print("current: ", current_feedback)
                 break
             except RuntimeError:
                 print("[init] Failed to find trajectory. Retrying...")
@@ -369,6 +421,15 @@ class DoosanDirectMotionBackend(MotionBackend):
         if len(base_poses) < 2:
             raise RuntimeError("[exec] A continuous spline requires at least two poses.")
 
+        reachability_max_iterations = int(
+            cfg.get("reachability_max_iterations", 5)
+        )
+        if reachability_max_iterations < 1:
+            raise ValueError(
+                "execution.continuous_spline.reachability_max_iterations "
+                "must be at least 1."
+            )
+
         if len(base_poses) > max_waypoints:
             sample_indices = np.linspace(
                 0, len(base_poses) - 1, max_waypoints, dtype=int
@@ -377,14 +438,18 @@ class DoosanDirectMotionBackend(MotionBackend):
         else:
             spline_poses = list(base_poses)
 
-        print(f"[exec] Pre-flight check on {len(spline_poses)} spline waypoints...")
+        spline_poses = repair_unreachable_spline_waypoints(
+            spline_poses,
+            max_iterations=reachability_max_iterations,
+            kinematic_check=self.check_spline_waypoint_kinematics,
+        )
+
+        print(
+            f"[exec] Preparing {len(spline_poses)} reachable spline waypoint(s) "
+            f"for the controller (limit={max_waypoints})."
+        )
         doosan_values = []
-        for i, T_base_ee in enumerate(spline_poses):
-            if not check_reachable(T_base_ee):
-                raise RuntimeError(
-                    f"[exec] Spline waypoint {i} is unreachable; aborting before motion. "
-                    f"base={T_base_ee[:3, 3]}"
-                )
+        for T_base_ee in spline_poses:
             doosan_values.append(se3_to_doosan_posx(T_base_ee))
 
         # Keep equivalent ZYZ Euler angles on one branch. Otherwise a benign
@@ -421,6 +486,13 @@ class DoosanDirectMotionBackend(MotionBackend):
             )
         print("[exec] Continuous Doosan spline complete.")
 
+    def check_spline_waypoint_kinematics(
+        self,
+        base_poses: list[np.ndarray],
+    ) -> tuple[list[bool], dict[int, str]]:
+        """Direct backend has no IK solver; report every pose as accepted."""
+        return [True] * len(base_poses), {}
+
     def move_to_joints(self, joints_or_target) -> None:
         target = normalize_motion_target(joints_or_target)
         if target.get("type") == "joint_values":
@@ -432,6 +504,73 @@ class DoosanDirectMotionBackend(MotionBackend):
 
 class DoosanSplineMotionBackend(MoveItMotionBackend):
     """Use MoveIt for setup moves and one Doosan spline for the blowing pass."""
+
+    def __init__(self):
+        super().__init__()
+        self.ik_client = None
+
+    def _get_ik_client(self, service_name: str):
+        if self.ik_client is None:
+            self.ik_client = create_available_service_client(
+                GetPositionIK,
+                service_name,
+                timeout_sec=10.0,
+            )
+        return self.ik_client
+
+    def check_spline_waypoint_kinematics(
+        self,
+        base_poses: list[np.ndarray],
+    ) -> tuple[list[bool], dict[int, str]]:
+        """Check controller spline poses with MoveIt inverse kinematics."""
+        cfg = CONFIG.get("execution", {}).get("continuous_spline", {})
+        if not bool(cfg.get("moveit_ik_preflight", True)):
+            print("[exec] MoveIt IK spline pre-flight is disabled.")
+            return [True] * len(base_poses), {}
+
+        service_name = str(cfg.get("ik_service", "compute_ik"))
+        timeout_sec = float(cfg.get("ik_timeout_sec", 0.2))
+        if timeout_sec <= 0.0:
+            raise ValueError(
+                "execution.continuous_spline.ik_timeout_sec must be positive."
+            )
+        client = self._get_ik_client(service_name)
+        reachable = []
+        rejection_reasons = {}
+        print(
+            f"[exec] MoveIt IK pre-flight on all {len(base_poses)} controller "
+            "spline waypoint(s)..."
+        )
+        for index, pose in enumerate(base_poses):
+            request = GetPositionIK.Request()
+            request.ik_request.group_name = MOVEIT_GROUP
+            request.ik_request.ik_link_name = MOVEIT_EE_LINK
+            request.ik_request.avoid_collisions = False
+            request.ik_request.robot_state.is_diff = True
+            request.ik_request.pose_stamped = PoseStamped()
+            request.ik_request.pose_stamped.header.frame_id = MOVEIT_BASE_FRAME
+            request.ik_request.pose_stamped.pose = make_pose_msg(pose)
+            timeout_ns = int(round(timeout_sec * 1_000_000_000))
+            request.ik_request.timeout.sec = timeout_ns // 1_000_000_000
+            request.ik_request.timeout.nanosec = timeout_ns % 1_000_000_000
+            response = call_service_sync(
+                client,
+                request,
+                service_name,
+                timeout_sec=max(2.0, timeout_sec + 1.0),
+            )
+            code = int(response.error_code.val)
+            success = code == 1
+            reachable.append(success)
+            if not success:
+                error_name = MOVEIT_ERROR_NAMES.get(code, "UNKNOWN_MOVEIT_ERROR")
+                detail = str(getattr(response.error_code, "message", "")).strip()
+                reason = f"rejected by IK: {error_name} ({code})"
+                if detail:
+                    reason += f": {detail}"
+                rejection_reasons[index] = reason
+
+        return reachable, rejection_reasons
 
     def execute_plan(self, plan) -> None:
         if isinstance(plan, TrajectoryPlan):
@@ -1018,8 +1157,8 @@ def generate_cartesian_guide_trajectory(
 ) -> list[np.ndarray]:
     """
     Given a list of SE(3) poses (4×4, world frame, meters),
-    generate a smooth trajectory via:
-      - Cubic spline for translation (arc-length parameterised)
+    generate a continuous trajectory via:
+      - Straight-line translation between each consecutive keypoint
       - SLERP for rotation (short-arc guaranteed)
 
     Parameters
@@ -1035,33 +1174,32 @@ def generate_cartesian_guide_trajectory(
     if N < 2:
         raise ValueError("Need at least 2 poses to generate a trajectory.")
 
-    # arc-length parameterisation
-    translations = np.array([T[:3, 3] for T in poses])
-    dists = np.linalg.norm(np.diff(translations, axis=0), axis=1)
-    dists = np.maximum(dists, 1e-8)
-    t_knots = np.concatenate([[0.0], np.cumsum(dists)])
-    t_knots /= t_knots[-1]
-
-    # cubic spline on translation
-    cs = CubicSpline(t_knots, translations)
+    if n_interp < 1:
+        raise ValueError("n_interp must be at least 1.")
 
     # SLERP on rotation — enforce short-arc via quaternion sign consistency
     quats = [R.from_matrix(T[:3, :3]).as_quat() for T in poses]
     for i in range(1, len(quats)):
         if np.dot(quats[i - 1], quats[i]) < 0:
             quats[i] = -quats[i]
-    rotations = R.from_quat(quats)
-    slerp = Slerp(t_knots, rotations)
-
-    # dense parameter values
-    t_dense = np.linspace(0.0, 1.0, (N - 1) * n_interp + 1)
-
     trajectory = []
-    for t in t_dense:
-        T = np.eye(4)
-        T[:3, 3] = cs(t)
-        T[:3, :3] = slerp(t).as_matrix()
-        trajectory.append(T)
+    for segment_index in range(N - 1):
+        start = poses[segment_index]
+        stop = poses[segment_index + 1]
+        rotation_slerp = Slerp(
+            [0.0, 1.0],
+            R.from_quat([quats[segment_index], quats[segment_index + 1]]),
+        )
+        # Exclude each segment's final pose; it is the next segment's start.
+        for step in range(n_interp):
+            alpha = float(step) / float(n_interp)
+            interpolated = np.eye(4)
+            interpolated[:3, 3] = (
+                (1.0 - alpha) * start[:3, 3] + alpha * stop[:3, 3]
+            )
+            interpolated[:3, :3] = rotation_slerp(alpha).as_matrix()
+            trajectory.append(interpolated)
+    trajectory.append(np.asarray(poses[-1], dtype=float).copy())
 
     return trajectory
 
@@ -1175,17 +1313,254 @@ def check_reachable(
 ) -> bool:
     """
     Rough reachability check for M0609 (max reach ~900mm).
-    Returns False if too far from base or below base plane.
+    Returns False if too far from the base. The former Z-height constraint is
+    temporarily disabled; MoveIt IK still validates controller waypoints.
     """
-    t = T_base_ee[:3, 3]
-    dist = np.linalg.norm(t)
-    if dist > robot_reach:
-        print(f"[check] UNREACHABLE: distance {dist*1000:.1f}mm > {robot_reach*1000:.0f}mm")
-        return False
-    if t[2] < -2:
-        print(f"[check] UNREACHABLE: z={t[2]*1000:.1f}mm is below base plane")
+    reason = geometric_reachability_failure_reason(T_base_ee, robot_reach)
+    if reason is not None:
+        print(f"[check] UNREACHABLE: {reason}")
         return False
     return True
+
+
+def geometric_reachability_failure_reason(
+    T_base_ee: np.ndarray,
+    robot_reach: float = float(CONFIG["robot"].get("reach_m", 0.900)),
+) -> str | None:
+    """Describe a geometric reach-envelope failure, if any."""
+    pose = np.asarray(T_base_ee, dtype=float)
+    if pose.shape != (4, 4) or not np.all(np.isfinite(pose)):
+        return "invalid or non-finite SE(3) pose"
+    distance_m = float(np.linalg.norm(pose[:3, 3]))
+    if distance_m > robot_reach:
+        return (
+            f"base distance {distance_m * 1000.0:.1f} mm exceeds "
+            f"configured reach {robot_reach * 1000.0:.1f} mm"
+        )
+    return None
+
+
+def reject_unreachable_spline_waypoints(
+    base_poses: list[np.ndarray],
+) -> list[np.ndarray]:
+    """Compatibility helper that removes geometrically unreachable poses."""
+    print(
+        f"[exec] Reachability pre-flight on all {len(base_poses)} generated "
+        "spline waypoint(s)..."
+    )
+    reachable = []
+    rejection_reasons = {}
+    for index, pose in enumerate(base_poses):
+        is_reachable = bool(check_reachable(pose))
+        reachable.append(is_reachable)
+        if not is_reachable:
+            detail = geometric_reachability_failure_reason(pose)
+            rejection_reasons[index] = (
+                "rejected by reachability: "
+                f"{detail or 'geometric reachability check failed'}"
+            )
+    report_spline_rejections(
+        base_poses,
+        reachable,
+        check_name="geometric reach",
+        rejection_reasons=rejection_reasons,
+    )
+    retained = [pose for pose, accepted in zip(base_poses, reachable) if accepted]
+    if len(retained) < 2:
+        raise RuntimeError(
+            "[exec] Geometric reach pre-flight left fewer than two reachable "
+            f"spline waypoints; rejected={len(base_poses) - len(retained)}/"
+            f"{len(base_poses)}."
+        )
+    return retained
+
+
+def report_spline_rejections(
+    base_poses: list[np.ndarray],
+    reachable: list[bool],
+    check_name: str,
+    rejection_reasons: dict[int, str] | None = None,
+) -> list[int]:
+    """Print every failed spline waypoint and return its index."""
+    if len(base_poses) != len(reachable):
+        raise ValueError("Spline poses and reachability results must have equal length.")
+    rejected_indices = [
+        index for index, is_reachable in enumerate(reachable) if not is_reachable
+    ]
+    rejection_reasons = rejection_reasons or {}
+    if rejected_indices:
+        print(f"[exec] {check_name} rejection report:")
+        for index in rejected_indices:
+            pose = np.asarray(base_poses[index], dtype=float)
+            if pose.shape == (4, 4) and np.all(np.isfinite(pose[:3, 3])):
+                xyz_text = np.array2string(
+                    pose[:3, 3] * 1000.0,
+                    precision=1,
+                    separator=", ",
+                )
+            else:
+                xyz_text = "invalid"
+            reason = rejection_reasons.get(
+                index, f"rejected by {check_name}"
+            )
+            print(
+                f"[exec]   waypoint {index}: base_xyz_mm={xyz_text}; "
+                f"reason={reason}"
+            )
+
+    if rejected_indices:
+        print(
+            f"[exec] {check_name} rejected {len(rejected_indices)}/"
+            f"{len(base_poses)} waypoint(s)."
+        )
+    else:
+        print(f"[exec] {check_name} pre-flight: all waypoints are reachable.")
+    return rejected_indices
+
+
+def reinterpolate_spline_waypoints(
+    keypoints: list[np.ndarray],
+    waypoint_count: int,
+) -> list[np.ndarray]:
+    """Resample retained keypoints along straight Cartesian line segments."""
+    if len(keypoints) < 2:
+        raise ValueError("At least two keypoints are required for interpolation.")
+    if waypoint_count < 2:
+        raise ValueError("At least two output waypoints are required.")
+
+    translations = np.asarray([pose[:3, 3] for pose in keypoints], dtype=float)
+    distances = np.linalg.norm(np.diff(translations, axis=0), axis=1)
+    distances = np.maximum(distances, 1e-8)
+    knots = np.concatenate([[0.0], np.cumsum(distances)])
+    knots /= knots[-1]
+    quaternions = [R.from_matrix(pose[:3, :3]).as_quat() for pose in keypoints]
+    for index in range(1, len(quaternions)):
+        if np.dot(quaternions[index - 1], quaternions[index]) < 0:
+            quaternions[index] = -quaternions[index]
+    rotation_spline = Slerp(knots, R.from_quat(quaternions))
+
+    result = []
+    for parameter in np.linspace(0.0, 1.0, waypoint_count):
+        pose = np.eye(4)
+        pose[:3, 3] = [
+            np.interp(parameter, knots, translations[:, axis])
+            for axis in range(3)
+        ]
+        pose[:3, :3] = rotation_spline(parameter).as_matrix()
+        result.append(pose)
+    return result
+
+
+def repair_unreachable_spline_waypoints(
+    base_poses: list[np.ndarray],
+    max_iterations: int,
+    kinematic_check,
+) -> list[np.ndarray]:
+    """Remove failed points and rebuild the spline until every point passes."""
+    if len(base_poses) < 2:
+        raise RuntimeError("[exec] A continuous spline requires at least two poses.")
+    if max_iterations < 1:
+        raise ValueError("Reachability repair max_iterations must be at least 1.")
+
+    waypoint_count = len(base_poses)
+    candidates = list(base_poses)
+    for iteration in range(1, max_iterations + 1):
+        print(
+            f"[exec] Reachability repair iteration {iteration}/"
+            f"{max_iterations} on {len(candidates)} spline waypoint(s)..."
+        )
+        geometric_results = []
+        geometric_reasons = {}
+        for index, pose in enumerate(candidates):
+            detail = geometric_reachability_failure_reason(pose)
+            accepted = detail is None
+            geometric_results.append(accepted)
+            if not accepted:
+                geometric_reasons[index] = (
+                    "rejected by reachability: "
+                    f"{detail or 'geometric reachability check failed'}"
+                )
+        report_spline_rejections(
+            candidates,
+            geometric_results,
+            check_name=f"geometric reach (iteration {iteration})",
+            rejection_reasons=geometric_reasons,
+        )
+
+        geometric_indices = [
+            index for index, accepted in enumerate(geometric_results) if accepted
+        ]
+        geometric_candidates = [candidates[index] for index in geometric_indices]
+        if len(geometric_candidates) >= 2:
+            ik_results, local_ik_reasons = kinematic_check(geometric_candidates)
+            if len(ik_results) != len(geometric_candidates):
+                raise RuntimeError(
+                    "[exec] Kinematic pre-flight returned an invalid result count."
+                )
+        else:
+            ik_results, local_ik_reasons = [], {}
+
+        combined_results = list(geometric_results)
+        combined_reasons = dict(geometric_reasons)
+        for local_index, accepted in enumerate(ik_results):
+            original_index = geometric_indices[local_index]
+            combined_results[original_index] = bool(accepted)
+            if not accepted:
+                combined_reasons[original_index] = local_ik_reasons.get(
+                    local_index, "rejected by IK"
+                )
+
+        # IK reports use the original iteration indices so they can be matched
+        # directly to the path shown in the geometric report. Do not describe
+        # the direct backend's no-op kinematic check as a MoveIt check.
+        ik_rejected = any(not accepted for accepted in ik_results)
+        if ik_rejected:
+            ik_only_results = [
+                (not geometric_results[index]) or combined_results[index]
+                for index in range(len(candidates))
+            ]
+            report_spline_rejections(
+                candidates,
+                ik_only_results,
+                check_name=f"kinematic reach (iteration {iteration})",
+                rejection_reasons=combined_reasons,
+            )
+
+        rejected_indices = [
+            index for index, accepted in enumerate(combined_results) if not accepted
+        ]
+        if not rejected_indices:
+            print(
+                f"[exec] All {len(candidates)} spline waypoints passed "
+                f"reachability after {iteration} iteration(s)."
+            )
+            return candidates
+
+        retained = [
+            pose for pose, accepted in zip(candidates, combined_results) if accepted
+        ]
+        if len(retained) < 2:
+            raise RuntimeError(
+                "[exec] Reachability repair left fewer than two spline "
+                f"waypoints at iteration {iteration}; rejected="
+                f"{len(rejected_indices)}/{len(candidates)}."
+            )
+        if iteration == max_iterations:
+            raise RuntimeError(
+                "[exec] Spline reachability repair reached "
+                f"reachability_max_iterations={max_iterations} with "
+                f"{len(rejected_indices)} rejected waypoint(s) still present. "
+                "The unchecked rebuilt spline will not be executed."
+            )
+
+        print(
+            f"[exec] Removing only the {len(rejected_indices)} rejected "
+            f"waypoint(s), retaining {len(retained)}, and re-interpolating "
+            f"the path to {waypoint_count} controller waypoint(s)."
+        )
+        candidates = reinterpolate_spline_waypoints(retained, waypoint_count)
+
+    raise AssertionError("Unreachable spline repair loop terminated unexpectedly.")
 
 
 def execute_moveit_trajectory(plan: TrajectoryPlan) -> None:
@@ -1269,7 +1644,11 @@ def execute_trajectory(
         print(f"[exec] wp{i:03d}  base(m)={np.round(T_base_ee[:3,3],3)}  posx={[f'{v:.1f}' for v in doosan_pose]}")
         movel(posx(*doosan_pose), vel=vel, acc=acc)
         time.sleep(0.5)
-        actual, _ = get_current_posx()
+        current_feedback = get_current_doosan_pose_safely("verify")
+        if current_feedback is None:
+            print("[verify] Skipping actual-pose comparison.")
+            continue
+        actual, _ = current_feedback
         print(f"[verify] commanded: {[f'{v:.1f}' for v in doosan_pose]}")
         print(f"[verify] actual   : {[f'{v:.1f}' for v in actual]}")
         print(f"[verify] delta    : {[f'{doosan_pose[i]-actual[i]:.1f}' for i in range(6)]}")
