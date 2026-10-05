@@ -165,6 +165,7 @@ def main(args=None):
                 query_pixels,
                 rgb_sift_overlay_bgr=detector.last_rgb_sift_overlay,
                 alpha=float(detector_cfg.get("pdf_overlay_alpha", 0.55)),
+                rgb_feature_backbone=detector.rgb_feature_extractor.backbone,
             )
         T_w_cm = get_current_camera_transform(T_w_b)
     else:

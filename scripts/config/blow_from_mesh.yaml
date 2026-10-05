@@ -177,6 +177,14 @@ chip_detector:
   depth_fit_scale: 0.5
   depth_pdf_downsample_factor: 1
   rgb_fit_scale: 0.5
+  # Require a location in every fresh baseline RGB frame (frames_to_average).
+  rgb_baseline_match_radius: 3.0  # Extraction-image pixels; separate from rejection radius
+  # RGB keypoint backbone: sift or superpoint (optional DL dependencies).
+  rgb_feature_backbone: sift
+  rgb_feature_device: auto  # SuperPoint: auto, cpu, or cuda
+  rgb_superpoint_max_keypoints: 1024
+  rgb_superpoint_detection_threshold: 0.0005
+  rgb_superpoint_nms_radius: 4
   rgb_num_features: 0
   rgb_sift_contrast: 0.02
   rgb_sift_edge: 12
@@ -184,7 +192,7 @@ chip_detector:
   rgb_include_outliers: true
   rgb_outlier_radius: 15
   rgb_outlier_probability: 0.8
-  # Radius in pixels of the rgb_fit_scale image. Current SIFT features this
+  # Radius in pixels of the rgb_fit_scale image. Current RGB features this
   # close to a clean-reference feature are rejected before RGB GMM fitting.
   rgb_ignore_feature_radius: 6.0
   rgb_pdf_downsample_factor: 1

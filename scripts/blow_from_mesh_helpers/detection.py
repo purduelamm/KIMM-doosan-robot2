@@ -48,6 +48,7 @@ except Exception as exc:
 import matplotlib.pyplot as plt
 
 from .config import *
+from rgb_features import PersistentFeatureBaseline, create_rgb_feature_extractor, draw_feature_overlay
 from .math_utils import make_SE3
 from .ros_context import (
     air_node,
@@ -63,7 +64,7 @@ from .ros_context import (
 
 _fit_depth_cls = None
 _fit_rgb_sift_cls = None
-BASELINE_SCHEMA_VERSION = 1
+BASELINE_SCHEMA_VERSION = 3
 
 
 def resolve_baseline_path(path: str) -> str:
@@ -161,6 +162,7 @@ class RGBDFrameGrabber:
         self.latest_rgb_bgr = None
         self.latest_depth_mm = None
         self._depth_samples = []
+        self._depth_frame_target = 0
         self._collect_depth = False
         self._rgb_frame_callback = None
         self.rgb_sub = node.create_subscription(Image, rgb_topic, self._rgb_cb, 10)
@@ -177,7 +179,7 @@ class RGBDFrameGrabber:
         depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
         depth_mm = depth_image_to_mm(depth, self.depth_unit)
         self.latest_depth_mm = depth_mm
-        if self._collect_depth:
+        if self._collect_depth and len(self._depth_samples) < self._depth_frame_target:
             self._depth_samples.append(depth_mm.copy())
 
     def wait_for_frames(self, timeout_sec: float = 10.0) -> tuple[np.ndarray, np.ndarray]:
@@ -194,23 +196,49 @@ class RGBDFrameGrabber:
         frames_to_average: int,
         timeout_sec: float = 10.0,
         rgb_frame_callback=None,
+        rgb_frames_to_collect: int = 0,
     ) -> np.ndarray:
         frames_to_average = max(1, int(frames_to_average))
+        if type(rgb_frames_to_collect) is not int or rgb_frames_to_collect < 0:
+            raise ValueError("rgb_frames_to_collect must be a non-negative integer.")
+        if rgb_frames_to_collect and rgb_frame_callback is None:
+            raise ValueError("An RGB callback is required when collecting RGB frames.")
         self._depth_samples = []
-        self._rgb_frame_callback = rgb_frame_callback
+        self._depth_frame_target = frames_to_average
+        rgb_count = 0
+
+        def collect_rgb(frame):
+            nonlocal rgb_count
+            if rgb_frames_to_collect and rgb_count >= rgb_frames_to_collect:
+                return
+            rgb_frame_callback(frame)
+            rgb_count += 1
+            if rgb_frames_to_collect:
+                print(
+                    f"[rgbd] Baseline progress: depth={len(self._depth_samples)}/{frames_to_average}, "
+                    f"RGB={rgb_count}/{rgb_frames_to_collect}."
+                )
+
+        self._rgb_frame_callback = collect_rgb if rgb_frame_callback is not None else None
         self._collect_depth = True
         print(f"[rgbd] Collecting {frames_to_average} depth frame(s) for average...")
-        if rgb_frame_callback is not None and self.latest_rgb_bgr is not None:
-            rgb_frame_callback(self.latest_rgb_bgr.copy())
         try:
-            t0 = time.time()
-            while len(self._depth_samples) < frames_to_average:
+            t0 = time.monotonic()
+            # Preserve legacy optional callbacks for depth-only callers. A
+            # targeted RGB capture uses only messages arriving after capture starts.
+            if rgb_frame_callback is not None and not rgb_frames_to_collect and self.latest_rgb_bgr is not None:
+                collect_rgb(self.latest_rgb_bgr.copy())
+            while len(self._depth_samples) < frames_to_average or rgb_count < rgb_frames_to_collect:
                 rclpy.spin_once(node, timeout_sec=0.1)
-                if time.time() - t0 > timeout_sec:
+                if time.monotonic() - t0 > timeout_sec:
                     raise RuntimeError(
                         f"[rgbd] Timed out after collecting "
-                        f"{len(self._depth_samples)}/{frames_to_average} depth frames."
+                        f"depth={len(self._depth_samples)}/{frames_to_average}, "
+                        f"RGB={rgb_count}/{rgb_frames_to_collect} frames."
                     )
+        except Exception:
+            self._depth_samples = []
+            raise
         finally:
             self._collect_depth = False
             self._rgb_frame_callback = None
@@ -246,22 +274,38 @@ def roi_mask(shape: tuple[int, int], cfg: dict) -> np.ndarray:
 
 
 class RGBDChipDetector:
-    """Depth-difference + RGB SIFT chip probability detector."""
+    """Depth-difference + selectable RGB feature chip probability detector."""
 
     def __init__(self, cfg: dict):
-        self.cfg = cfg
+        self.cfg = dict(cfg)
+        self.rgb_baseline_stack = PersistentFeatureBaseline(self.cfg)
+        scale = float(self.cfg.get("rgb_fit_scale", 0.5))
+        if not np.isfinite(scale) or scale <= 0.0:
+            raise ValueError("chip_detector.rgb_fit_scale must be greater than zero.")
+        self.rgb_feature_extractor = create_rgb_feature_extractor(self.cfg)
+        print(
+            f"[detect] RGB backbone: {self.rgb_feature_extractor.backbone} "
+            f"({self.rgb_feature_extractor.device})."
+        )
         self.last_depth_diff_mm = None
         self.last_depth_pdf = None
         self.last_rgb_pdf = None
         self.last_rgb_sift_overlay = None
         self.rgb_baseline_feature_coords = np.empty((0, 2), dtype=np.float32)
         self.rgb_baseline_frame_count = 0
+        self._baseline_capture_in_progress = False
         self.last_baseline_path = None
         self.last_baseline_metadata = None
 
     def reset_rgb_baseline(self) -> None:
+        self.rgb_baseline_stack.reset()
         self.rgb_baseline_feature_coords = np.empty((0, 2), dtype=np.float32)
         self.rgb_baseline_frame_count = 0
+        self._baseline_capture_in_progress = False
+        self.last_baseline_path = None
+        self.last_baseline_metadata = None
+        self.last_rgb_pdf = None
+        self.last_rgb_sift_overlay = None
 
     def _baseline_sift_settings(self) -> dict:
         return {
@@ -271,6 +315,12 @@ class RGBDChipDetector:
                 self.cfg.get("rgb_sift_contrast", 0.02)
             ),
             "rgb_sift_edge": float(self.cfg.get("rgb_sift_edge", 12)),
+        }
+
+    def _baseline_feature_settings(self) -> dict:
+        return {
+            "rgb_fit_scale": float(self.cfg.get("rgb_fit_scale", 0.5)),
+            **self.rgb_feature_extractor.settings,
         }
 
     @staticmethod
@@ -318,8 +368,15 @@ class RGBDChipDetector:
             )
         if not np.all(np.isfinite(coords)):
             raise ValueError("Baseline RGB feature coordinates must be finite.")
-        if self.rgb_baseline_frame_count < 0:
-            raise ValueError("Baseline RGB frame count must be non-negative.")
+        if (
+            self._baseline_capture_in_progress
+            or not self.rgb_baseline_stack.complete
+            or self.rgb_baseline_frame_count != self.rgb_baseline_stack.target_frames
+        ):
+            raise ValueError(
+                "Cannot save an incomplete RGB baseline or pending depth capture: "
+                f"{self.rgb_baseline_frame_count}/{self.rgb_baseline_stack.target_frames} frames."
+            )
 
         directory = resolve_baseline_path(save_directory)
         try:
@@ -340,7 +397,8 @@ class RGBDChipDetector:
             "depth_shape": list(depth.shape),
             "rgb_shape": list(rgb_shape),
             "rgb_fit_shape": list(fit_shape),
-            "sift_settings": self._baseline_sift_settings(),
+            "feature_settings": self._baseline_feature_settings(),
+            "baseline_stacking": self.rgb_baseline_stack.settings,
             "robot_type": str(robot_type),
             "robot_model": str(robot_model),
         }
@@ -432,7 +490,8 @@ class RGBDChipDetector:
         if type(schema_version) is not int or schema_version != BASELINE_SCHEMA_VERSION:
             raise RuntimeError(
                 f"[detect] Baseline archive '{archive_path}' uses schema "
-                f"{schema_version!r}; expected {BASELINE_SCHEMA_VERSION}."
+                f"{schema_version!r}; expected {BASELINE_SCHEMA_VERSION}. "
+                "Recapture the clean baseline; older archives lack feature persistence history."
             )
         if depth.ndim != 2 or not np.issubdtype(depth.dtype, np.number):
             raise RuntimeError(
@@ -507,12 +566,22 @@ class RGBDChipDetector:
                 "incompatible: " + "; ".join(shape_mismatches)
             )
 
-        stored_settings = metadata.get("sift_settings")
-        current_settings = self._baseline_sift_settings()
+        stored_settings = metadata.get("feature_settings")
+        current_settings = self._baseline_feature_settings()
         if stored_settings != current_settings:
             raise RuntimeError(
-                f"[detect] Baseline archive '{archive_path}' SIFT settings are "
-                f"incompatible: stored={stored_settings}, current={current_settings}."
+                f"[detect] Baseline archive '{archive_path}' RGB feature settings are "
+                f"incompatible: stored={stored_settings}, current={current_settings}. "
+                "Recapture the baseline for the selected backbone and settings."
+            )
+        if (
+            metadata.get("baseline_stacking") != self.rgb_baseline_stack.settings
+            or frame_count != self.rgb_baseline_stack.target_frames
+        ):
+            raise RuntimeError(
+                f"[detect] Baseline archive '{archive_path}' stacking settings or frame count "
+                "are incompatible. Recapture the clean baseline with the configured "
+                "frame target and matching radius."
             )
 
         expected_profile = {
@@ -530,7 +599,8 @@ class RGBDChipDetector:
                 "incompatible: " + "; ".join(profile_mismatches)
             )
 
-        self.rgb_baseline_feature_coords = coords.astype(np.float32, copy=True)
+        self.rgb_baseline_stack.restore(coords)
+        self.rgb_baseline_feature_coords = self.rgb_baseline_stack.coordinates
         self.rgb_baseline_frame_count = frame_count
         self.last_baseline_path = archive_path
         self.last_baseline_metadata = metadata
@@ -545,7 +615,7 @@ class RGBDChipDetector:
 
     def _rgb_fit_image(self, rgb_bgr: np.ndarray) -> np.ndarray:
         scale = float(self.cfg.get("rgb_fit_scale", 0.5))
-        if scale <= 0.0:
+        if not np.isfinite(scale) or scale <= 0.0:
             raise ValueError("chip_detector.rgb_fit_scale must be greater than zero.")
         if scale == 1.0:
             return rgb_bgr
@@ -558,11 +628,10 @@ class RGBDChipDetector:
         )
 
     def _detect_rgb_keypoints(self, rgb_gmm):
-        return rgb_gmm._sift_detector(
-            int(self.cfg.get("rgb_num_features", 0)),
-            float(self.cfg.get("rgb_sift_contrast", 0.02)),
-            float(self.cfg.get("rgb_sift_edge", 12)),
-        )
+        # Keep the existing method interface for callers and tests.
+        self.last_rgb_pdf = None
+        self.last_rgb_sift_overlay = None
+        return self.rgb_feature_extractor.detect(rgb_gmm.image)
 
     @staticmethod
     def keypoints_to_coords(keypoints) -> np.ndarray:
@@ -571,22 +640,23 @@ class RGBDChipDetector:
         return np.asarray([keypoint.pt for keypoint in keypoints], dtype=np.float32)
 
     def add_rgb_baseline_frame(self, rgb_bgr: np.ndarray) -> None:
-        if rgb_bgr is None:
+        if rgb_bgr is None or self.rgb_baseline_frame_count >= self.rgb_baseline_stack.target_frames:
             return
         _, FitRGB_SIFT = get_detector_classes()
         fit_img = self._rgb_fit_image(rgb_bgr)
         keypoints = self._detect_rgb_keypoints(FitRGB_SIFT(fit_img))
         coords = self.keypoints_to_coords(keypoints)
-        if coords.size:
-            self.rgb_baseline_feature_coords = np.vstack(
-                [self.rgb_baseline_feature_coords, coords]
-            )
-        self.rgb_baseline_frame_count += 1
+        self.rgb_baseline_stack.add_frame(coords)
+        self.rgb_baseline_frame_count = self.rgb_baseline_stack.frame_count
+        if not self._baseline_capture_in_progress:
+            self.rgb_baseline_feature_coords = self.rgb_baseline_stack.coordinates
         print(
-            f"[detect] Baseline RGB frame {self.rgb_baseline_frame_count}: "
-            f"found {len(coords)} SIFT feature(s), "
-            f"stored {len(self.rgb_baseline_feature_coords)} total."
+            f"[detect] Baseline RGB frame {self.rgb_baseline_frame_count}/{self.rgb_baseline_stack.target_frames}: "
+            f"found {len(coords)} {self.rgb_feature_extractor.backbone} feature(s), "
+            f"persistent candidates={self.rgb_baseline_stack.candidate_count}."
         )
+        if self.rgb_baseline_stack.complete:
+            print(f"[detect] RGB stack complete: {len(self.rgb_baseline_stack.coordinates)} persistent features.")
 
     def filter_rgb_baseline_features(self, keypoints):
         if not keypoints or self.rgb_baseline_feature_coords.size == 0:
@@ -615,18 +685,11 @@ class RGBDChipDetector:
         keypoint_coords: np.ndarray | None,
         scale_x: float = 1.0,
         scale_y: float = 1.0,
+        rejected_keypoint_coords: np.ndarray | None = None,
     ) -> np.ndarray:
-        overlay = rgb_bgr.copy()
-        if keypoint_coords is None:
-            return overlay
-        height, width = overlay.shape[:2]
-        for x, y in keypoint_coords:
-            cx = int(round(float(x) * scale_x))
-            cy = int(round(float(y) * scale_y))
-            if 0 <= cx < width and 0 <= cy < height:
-                cv2.circle(overlay, (cx, cy), 4, (0, 255, 0), 1, cv2.LINE_AA)
-                cv2.circle(overlay, (cx, cy), 1, (0, 0, 255), -1, cv2.LINE_AA)
-        return overlay
+        return draw_feature_overlay(
+            rgb_bgr, keypoint_coords, scale_x, scale_y, rejected_keypoint_coords
+        )
 
     def detect(
         self,
@@ -674,7 +737,7 @@ class RGBDChipDetector:
         diff_mm[valid] = reference_depth_mm[valid] - current_depth_mm[valid]
         self.last_depth_diff_mm = diff_mm.copy()
         # This mask is deliberately image-wide rather than ROI-limited. RGB
-        # SIFT extraction runs over the full aligned color frame, so every
+        # Feature extraction runs over the full aligned color frame, so every
         # feature whose baseline-depth pixel exceeds the threshold must be
         # rejected, including features outside mask_roi.
         beyond_baseline_depth = (
@@ -762,6 +825,8 @@ class RGBDChipDetector:
         feature_allowed_mask: np.ndarray | None = None,
     ) -> np.ndarray:
         _, FitRGB_SIFT = get_detector_classes()
+        self.last_rgb_pdf = None
+        self.last_rgb_sift_overlay = None
         if rgb_bgr is None:
             self.last_rgb_sift_overlay = None
             return np.zeros(output_shape, dtype=np.float32)
@@ -793,6 +858,10 @@ class RGBDChipDetector:
         retained_keypoints = self.filter_rgb_baseline_features(
             depth_retained_keypoints
         )
+        retained_ids = {id(keypoint) for keypoint in retained_keypoints}
+        rejected_keypoints = [
+            keypoint for keypoint in current_keypoints if id(keypoint) not in retained_ids
+        ]
         depth_rejected_count = len(current_keypoints) - len(
             depth_retained_keypoints
         )
@@ -800,7 +869,8 @@ class RGBDChipDetector:
             retained_keypoints
         )
         print(
-            f"[detect] RGB SIFT features: baseline={len(self.rgb_baseline_feature_coords)}, "
+            f"[detect] RGB {self.rgb_feature_extractor.backbone} features: "
+            f"baseline={len(self.rgb_baseline_feature_coords)}, "
             f"current={len(current_keypoints)}, "
             f"depth-rejected={depth_rejected_count}, "
             f"baseline-rejected={baseline_rejected_count}, "
@@ -818,9 +888,10 @@ class RGBDChipDetector:
             rgb_gmm.keypoint_coords,
             scale_x,
             scale_y,
+            rejected_keypoint_coords=self.keypoints_to_coords(rejected_keypoints),
         )
         if rgb_gmm.gmm is None:
-            print("[detect] No RGB SIFT features remain; using depth PDF only.")
+            print("[detect] Fewer than two RGB features remain; RGB feature PDF is zero.")
             return np.zeros(output_shape, dtype=np.float32)
 
         pdf = rgb_gmm.rgb_gmm_to_pdf(
@@ -863,11 +934,22 @@ def prepare_detection_baseline(
 
     if mode == "capture":
         detector.reset_rgb_baseline()
-        reference_depth = rgbd.average_depth(
-            frames_to_average=int(detector_cfg.get("frames_to_average", 30)),
-            timeout_sec=float(detector_cfg.get("reference_timeout_sec", 15.0)),
-            rgb_frame_callback=detector.add_rgb_baseline_frame,
-        )
+        detector._baseline_capture_in_progress = True
+        try:
+            reference_depth = rgbd.average_depth(
+                frames_to_average=detector.rgb_baseline_stack.target_frames,
+                timeout_sec=detector.rgb_baseline_stack.timeout_sec,
+                rgb_frame_callback=detector.add_rgb_baseline_frame,
+                rgb_frames_to_collect=detector.rgb_baseline_stack.target_frames,
+            )
+            if not detector.rgb_baseline_stack.complete:
+                raise RuntimeError("[detect] RGB baseline capture is incomplete; no archive was saved.")
+        except Exception:
+            detector.reset_rgb_baseline()
+            raise
+        detector._baseline_capture_in_progress = False
+        detector.rgb_baseline_feature_coords = detector.rgb_baseline_stack.coordinates
+        print(f"[detect] Baseline ready: {len(detector.rgb_baseline_feature_coords)} persistent features.")
         baseline_rgb = rgbd.latest_rgb_bgr
         if baseline_rgb is None:
             baseline_rgb = initial_rgb_bgr
@@ -931,6 +1013,7 @@ def visualize_pdf_debug(
     sampled_points: list[tuple[float, float]],
     rgb_sift_overlay_bgr: np.ndarray | None = None,
     alpha: float = 0.55,
+    rgb_feature_backbone: str = "sift",
 ) -> None:
     rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
     if rgb_sift_overlay_bgr is None:
@@ -974,7 +1057,10 @@ def visualize_pdf_debug(
     fig, axes = plt.subplots(2, 4, figsize=(20, 9), constrained_layout=True)
     panels = [
         ("RGB image", rgb, None, None, None),
-        ("Retained RGB SIFT features", rgb_sift_overlay, None, None, None),
+        (
+            f"RGB {rgb_feature_backbone} features\nGreen: retained | Red: rejected",
+            rgb_sift_overlay, None, None, None,
+        ),
         (
             "Baseline depth [mm]",
             baseline_depth_mm,
